@@ -9,16 +9,6 @@ use std::collections::VecDeque;
 use std::collections::HashMap;
 use std::mem::MaybeUninit;
 
-static mut N: u32 = 8;
-static mut L: u32 = 4;
-static mut R: u32 = 1;
-static mut C: u32 = 1; /* Initial number of replicas */
-static mut Z: u32 = 1;
-static mut epoch: u32 = 14; //2(N-1)
-static mut rate_ratio: u32 = 10; //Ratio of server's processing : Client's processing
-static mut two: u32 = 2;
-
-
 macro_rules! printdbgln {
     ($dlvl:expr, $($arg:tt)*) => {
         if $dlvl > 0 {
@@ -34,6 +24,18 @@ macro_rules! printdbg {
         }
     }
 }
+
+static mut N: u32 = 8;
+static mut L: u32 = 4;
+static mut R: u32 = 1;
+static mut C: u32 = 1; /* Initial number of replicas */
+static mut Z: u32 = 1;
+static mut epoch: u32 = 14; //2(N-1)
+static mut rate_ratio: u32 = 10; //Ratio of server's processing : Client's processing
+static mut two: u32 = 2;
+static mut idx: usize = 0;
+static mut tu: u64 = 0; /* Count of time unit */
+
 
 struct m {
     id: u32,
@@ -54,16 +56,6 @@ struct Bucket {
 #[derive(Debug)]
 struct Stat {
     access_cnt: u64,
-    w_cnt: u64,
-    r_cnt: u64,
-    x_cnt: u64,
-    out_up_cnt: u64,
-    out_lft_cnt: u64,
-    out_rgt_cnt: u64,
-    in_up_cnt: u64,
-    in_lft_cnt: u64,
-    in_rgt_cnt: u64,
-    sty_cnt: u64,
     max: u32,
     avg: f64,
     var: f64,    //Variance of occupancy
@@ -77,16 +69,6 @@ impl Bucket {
             b: label,
             stat: Stat {
                 access_cnt: 0,
-                w_cnt: 0,
-                r_cnt: 0,
-                x_cnt: 0,                
-                out_up_cnt: 0,
-                out_lft_cnt: 0,
-                out_rgt_cnt: 0,
-                in_up_cnt: 0,
-                in_lft_cnt: 0,
-                in_rgt_cnt: 0,
-                sty_cnt: 0,
                 max: 0,
                 avg: 0.0,
                 var: 0.0,    //Variance of occupancy
@@ -143,16 +125,6 @@ impl Bucket {
 
         Stat {
             access_cnt: self.stat.access_cnt,
-            w_cnt: self.stat.w_cnt,
-            r_cnt: self.stat.r_cnt,
-            x_cnt: self.stat.x_cnt,            
-            out_up_cnt: self.stat.out_up_cnt,
-            out_lft_cnt: self.stat.out_lft_cnt,
-            out_rgt_cnt: self.stat.out_rgt_cnt,
-            in_up_cnt: self.stat.in_up_cnt,
-            in_lft_cnt: self.stat.in_lft_cnt,
-            in_rgt_cnt: self.stat.in_rgt_cnt,
-            sty_cnt: self.stat.sty_cnt,
             max: self.stat.max,
             avg: self.stat.avg,
             var: self.stat.var,    //Variance of occupancy
@@ -167,49 +139,19 @@ impl Bucket {
             1,
             "Bucket[{}]:\t\
     {}\t\
-    {}\t\
-    {}\t\
-    {}\t\
     {:.2}\t\
     {:.2}\t\
-    {}\t\
-    {}\t\
-    {}\t\
-    {}\t\
-    {}\t\
-    {}\t\
-    {}\t\
     {}",
             self.b,
             self.stat.access_cnt,
-            self.stat.r_cnt,
-            self.stat.w_cnt,
-            self.stat.x_cnt,
             self.stat.avg,
             self.stat.var,
             self.stat.max,
-            self.stat.out_up_cnt,
-            self.stat.out_lft_cnt,
-            self.stat.out_rgt_cnt,
-            self.stat.in_up_cnt,
-            self.stat.in_lft_cnt,
-            self.stat.in_rgt_cnt,
-            self.stat.sty_cnt
             //self.blocks,
         );
 
         Stat {
             access_cnt: self.stat.access_cnt,
-            w_cnt: self.stat.w_cnt,
-            r_cnt: self.stat.r_cnt,
-            x_cnt: self.stat.x_cnt,            
-            out_up_cnt: self.stat.out_up_cnt,
-            out_lft_cnt: self.stat.out_lft_cnt,
-            out_rgt_cnt: self.stat.out_rgt_cnt,
-            in_up_cnt: self.stat.in_up_cnt,
-            in_lft_cnt: self.stat.in_lft_cnt,
-            in_rgt_cnt: self.stat.in_rgt_cnt,
-            sty_cnt: self.stat.sty_cnt,
             max: self.stat.max,
             avg: self.stat.avg,
             var: self.stat.var,    //Variance of occupancy
