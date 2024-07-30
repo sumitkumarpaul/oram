@@ -9,6 +9,16 @@ use std::collections::VecDeque;
 use std::collections::HashMap;
 use std::mem::MaybeUninit;
 
+static mut N: u32 = 8;
+static mut L: u32 = 4;
+static mut R: u32 = 1;
+static mut C: u32 = 1; /* Initial number of replicas */
+static mut Z: u32 = 1;
+static mut epoch: u32 = 14; //2(N-1)
+static mut rate_ratio: u32 = 10; //Ratio of server's processing : Client's processing
+static mut two: u32 = 2;
+
+
 macro_rules! printdbgln {
     ($dlvl:expr, $($arg:tt)*) => {
         if $dlvl > 0 {
@@ -24,6 +34,190 @@ macro_rules! printdbg {
         }
     }
 }
+
+struct m {
+    id: u32,
+    lf: u32,
+}
+struct blk {
+    m: m,
+    d: [u32; 2],
+}
+
+#[derive(Debug)]
+struct Bucket {
+    b: u32,           //The label of this bucket
+    blocks: Vec<u32>, //List holding the leaf identifiers of the blocks
+    stat: Stat,
+}
+
+#[derive(Debug)]
+struct Stat {
+    access_cnt: u64,
+    w_cnt: u64,
+    r_cnt: u64,
+    x_cnt: u64,
+    out_up_cnt: u64,
+    out_lft_cnt: u64,
+    out_rgt_cnt: u64,
+    in_up_cnt: u64,
+    in_lft_cnt: u64,
+    in_rgt_cnt: u64,
+    sty_cnt: u64,
+    max: u32,
+    avg: f64,
+    var: f64,    //Variance of occupancy
+    sq_avg: f64, //Average of the square of the occupancy, required for calculating the variance
+}
+
+impl Bucket {
+    // Method to create a new Bucket
+    fn new(label: u32) -> Self {
+        Bucket {
+            b: label,
+            stat: Stat {
+                access_cnt: 0,
+                w_cnt: 0,
+                r_cnt: 0,
+                x_cnt: 0,                
+                out_up_cnt: 0,
+                out_lft_cnt: 0,
+                out_rgt_cnt: 0,
+                in_up_cnt: 0,
+                in_lft_cnt: 0,
+                in_rgt_cnt: 0,
+                sty_cnt: 0,
+                max: 0,
+                avg: 0.0,
+                var: 0.0,    //Variance of occupancy
+                sq_avg: 0.0, //Average of the square of the occupancy, required for calculating the variance
+            },
+            blocks: Vec::new(),
+        }
+    }
+
+    // Method to add a u32 to the end of the list
+    fn insert(&mut self, value: u32) {
+        self.blocks.push(value);
+    }
+
+    // Method to remove an item by its value
+    fn remove(&mut self, value: u32) -> u32 {
+        let mut removed_item: u32 = 0;
+
+        if let Some(pos) = self.blocks.iter().position(|&x| x == value) {
+            removed_item = self.blocks[pos];
+            self.blocks.remove(pos);
+        }
+
+        return removed_item;
+    }
+
+    // Method to update the statistics of the bucket
+    fn calc_stat(&mut self) -> Stat {
+        /* Store previous statistics */
+        let mut prev_avg: f64 = self.stat.avg;
+
+        let mut prev_avg_sq: f64 = self.stat.sq_avg;
+
+        let mut total: u64 = (prev_avg * (self.stat.access_cnt as f64)) as u64;
+
+        let mut sq_total: u64 = (prev_avg_sq * (self.stat.access_cnt as f64)) as u64;
+
+        self.stat.access_cnt += 1;
+
+        let mut current: u32 = self.blocks.len() as u32;
+        total += current as u64;
+        sq_total += current.pow(2) as u64;
+
+        self.stat.avg = (total as f64 / self.stat.access_cnt as f64) as f64;
+
+        self.stat.sq_avg = (sq_total as f64 / self.stat.access_cnt as f64) as f64;
+
+        /* var(X) = E[x^2] - E[x]^2*/
+        self.stat.var = self.stat.sq_avg - (self.stat.avg * self.stat.avg);
+
+        if current > self.stat.max {
+            self.stat.max = current;
+        }
+
+        Stat {
+            access_cnt: self.stat.access_cnt,
+            w_cnt: self.stat.w_cnt,
+            r_cnt: self.stat.r_cnt,
+            x_cnt: self.stat.x_cnt,            
+            out_up_cnt: self.stat.out_up_cnt,
+            out_lft_cnt: self.stat.out_lft_cnt,
+            out_rgt_cnt: self.stat.out_rgt_cnt,
+            in_up_cnt: self.stat.in_up_cnt,
+            in_lft_cnt: self.stat.in_lft_cnt,
+            in_rgt_cnt: self.stat.in_rgt_cnt,
+            sty_cnt: self.stat.sty_cnt,
+            max: self.stat.max,
+            avg: self.stat.avg,
+            var: self.stat.var,    //Variance of occupancy
+            sq_avg: self.stat.sq_avg, //Average of the square of the occupancy, required for calculating the variance
+        }
+    }
+
+    // Method printing the statistics of the bucket
+    // The printing order is always: access_count, average, variance, maximum, current content
+    fn print_stat(&mut self) -> Stat {
+        printdbgln!(
+            1,
+            "Bucket[{}]:\t\
+    {}\t\
+    {}\t\
+    {}\t\
+    {}\t\
+    {:.2}\t\
+    {:.2}\t\
+    {}\t\
+    {}\t\
+    {}\t\
+    {}\t\
+    {}\t\
+    {}\t\
+    {}\t\
+    {}",
+            self.b,
+            self.stat.access_cnt,
+            self.stat.r_cnt,
+            self.stat.w_cnt,
+            self.stat.x_cnt,
+            self.stat.avg,
+            self.stat.var,
+            self.stat.max,
+            self.stat.out_up_cnt,
+            self.stat.out_lft_cnt,
+            self.stat.out_rgt_cnt,
+            self.stat.in_up_cnt,
+            self.stat.in_lft_cnt,
+            self.stat.in_rgt_cnt,
+            self.stat.sty_cnt
+            //self.blocks,
+        );
+
+        Stat {
+            access_cnt: self.stat.access_cnt,
+            w_cnt: self.stat.w_cnt,
+            r_cnt: self.stat.r_cnt,
+            x_cnt: self.stat.x_cnt,            
+            out_up_cnt: self.stat.out_up_cnt,
+            out_lft_cnt: self.stat.out_lft_cnt,
+            out_rgt_cnt: self.stat.out_rgt_cnt,
+            in_up_cnt: self.stat.in_up_cnt,
+            in_lft_cnt: self.stat.in_lft_cnt,
+            in_rgt_cnt: self.stat.in_rgt_cnt,
+            sty_cnt: self.stat.sty_cnt,
+            max: self.stat.max,
+            avg: self.stat.avg,
+            var: self.stat.var,    //Variance of occupancy
+            sq_avg: self.stat.sq_avg, //Average of the square of the occupancy, required for calculating the variance
+        }
+    }
+}
+
 
 fn main() {
 
@@ -53,5 +247,50 @@ unsafe fn experimental_function() {
     // Print the histogram
     for (value, count) in &histogram {
         println!("{}: {}", value, count);
+    }
+}
+
+unsafe fn oram_exp() {
+    /* Set experimentation parameters fist */
+    N = two.pow(3);
+    R = 1;
+    Z = 6;//Number of slots in a bucket
+    C = Z/2;
+
+    /* Derived parameters */
+    L = ((N as f64).log2() as u32) + 1;
+    epoch = 2 * (N - 1);
+
+    /* Local variable */
+    let mut tree: Vec<Bucket> = Vec::with_capacity(2 * (N as usize) - 1);
+
+    printdbgln!(
+        1,
+        "Value of N = {}, R = {}, L = {}, Z = {}, epoch = {}, rate_ratio = {}",
+        N,
+        R,
+        L,
+        Z,
+        epoch,
+        rate_ratio
+    );
+
+    /* Loop from 1 to 2N - 1 */
+    for i in 1..=(2 * (N as usize) - 1) {
+        tree.push(Bucket::new(i as u32));
+    }
+
+    /* Initialize the ORAM with dummy data */
+    oram_init(&mut tree);
+}
+
+unsafe fn oram_init(tree: &mut Vec<Bucket>) {
+    //For experiment, randomly select a leaf node to read
+    for l in two.pow(L - 1)..=(two.pow(L) - 1) {
+        /* Insert C number of replicas, in each replica the same address is specified */
+        for i in 0..C {
+            tree[l as usize - 1].insert(l);
+        }
+        tree[l as usize - 1].calc_stat();
     }
 }
