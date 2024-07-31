@@ -164,8 +164,8 @@ impl Bucket {
 fn main() {
 
     unsafe {
-
-        experimental_function();
+        //oram_exp();
+        BG();
     }
 }
 
@@ -235,4 +235,177 @@ unsafe fn oram_init(tree: &mut Vec<Bucket>) {
         }
         tree[l as usize - 1].calc_stat();
     }
+}
+
+fn move_U2L(MU: &mut [i32], ML: &mut [i32]) {
+    let mut i = 0;
+    let mut j = 0;
+
+    printdbgln!(1, "======================");
+    printdbgln!(1, "Moving upper to lower:");
+    printdbgln!(1, "======================");
+
+    printdbg!(1, "MU array before operation: ");
+    for element in MU.iter() {
+        printdbg!(1, "{}, ", element);
+    }
+    printdbgln!(1, "");
+
+    printdbg!(1, "ML array before operation: ");
+    for element in ML.iter() {
+        printdbg!(1, "{}, ", element);
+    }
+    printdbgln!(1, "");
+
+    while (i < MU.len() && j < ML.len()) {
+        if MU[i] == 1 {
+            while ((j < ML.len()) && (ML[j] != 2)) {
+                j += 1;
+            }
+
+            if (j == ML.len()) {
+                break;
+            }
+            printdbgln!(1, "Moving down from MU[{}] to ML[{}]", i, j);
+
+            MU[i] = 0;
+            ML[j] = 0;
+            j += 1;
+        }
+
+        i += 1;
+    }
+
+    // Using a for loop to iterate through the array
+    printdbg!(1, "MU array after operation: ");
+    for element in MU.iter() {
+        printdbg!(1, "{}, ", element);
+    }
+    printdbgln!(1, "");
+
+    printdbg!(1, "ML array after operation: ");
+    for element in ML.iter() {
+        printdbg!(1, "{}, ", element);
+    }
+    printdbgln!(1, "");
+}
+
+fn move_L2U(MU: &mut [i32], ML: &mut [i32]) {
+    let mut i = 0;
+    let mut j = 0;
+
+    printdbgln!(1, "======================");
+    printdbgln!(1, "Moving lower to upper:");
+    printdbgln!(1, "======================");
+
+    printdbg!(1, "MU array before operation: ");
+    for element in MU.iter() {
+        printdbg!(1, "{}, ", element);
+    }
+    printdbgln!(1, "");
+
+    printdbg!(1, "ML array before operation: ");
+    for element in ML.iter() {
+        printdbg!(1, "{}, ", element);
+    }
+    printdbgln!(1, "");
+
+    while (i < ML.len() && j < MU.len()) {
+        if ML[i] == 1 {
+            while ((j < MU.len()) && (MU[j] != 2)) {
+                j += 1;
+            }
+
+            if (j == MU.len()) {
+                break;
+            }
+            printdbgln!(1, "Moving up from ML[{}] to MU[{}]", i, j);
+
+            MU[j] = 0;
+            ML[i] = 0;
+
+            j += 1;
+        }
+
+        i += 1;
+    }
+
+    // Using a for loop to iterate through the array
+    printdbg!(1, "MU array after operation: ");
+    for element in MU.iter() {
+        printdbg!(1, "{}, ", element);
+    }
+    printdbgln!(1, "");
+
+    printdbg!(1, "ML array after operation: ");
+    for element in ML.iter() {
+        printdbg!(1, "{}, ", element);
+    }
+    printdbgln!(1, "");
+}
+
+fn process_swap(MU: &mut [i32], ML: &mut [i32]) {
+    let mut i = 0;
+    let mut j = 0;
+
+    printdbgln!(1, "====================");
+    printdbgln!(1, "Performing swapping:");
+    printdbgln!(1, "====================");
+
+    printdbg!(1, "MU array before operation: ");
+    for element in MU.iter() {
+        printdbg!(1, "{}, ", element);
+    }
+    printdbgln!(1, "");
+
+    printdbg!(1, "ML array before operation: ");
+    for element in ML.iter() {
+        printdbg!(1, "{}, ", element);
+    }
+    printdbgln!(1, "");
+
+    while (i < MU.len() && j < ML.len()) {
+        if MU[i] == 1 {
+            while ((j < ML.len()) && (ML[j] != 1)) {
+                j += 1;
+            }
+
+            if (j == ML.len()) {
+                break;
+            }
+            printdbgln!(1, "Swap between MU[{}] and ML[{}]", i, j);
+
+            MU[i] = 0;
+            ML[j] = 0;
+
+            j += 1;
+        }
+
+        i += 1;
+    }
+
+    // Using a for loop to iterate through the array
+    printdbg!(1, "MU array after operation: ");
+    for element in MU.iter() {
+        printdbg!(1, "{}, ", element);
+    }
+    printdbgln!(1, "");
+
+    printdbg!(1, "ML array after operation: ");
+    for element in ML.iter() {
+        printdbg!(1, "{}, ", element);
+    }
+    printdbgln!(1, "");
+}
+
+fn BG() {
+    let mut MU = [1, 1, 1, 1, 1, 0, 0, 0, 0, 0]; // Movement of the upper bucket
+    let mut ML = [0, 0, 2, 2, 2, 0, 0, 1, 0, 0]; // Movement of the lower bucket
+
+    //let mut MU = [1,1,1,1,1,1,2,1,1,1]; // Movement of the upper bucket
+    //let mut ML = [1,1,1,2,1,1,1,1,0,1]; // Movement of the lower bucket
+
+    move_U2L(&mut MU, &mut ML);
+    move_L2U(&mut MU, &mut ML);
+    process_swap(&mut MU, &mut ML);
 }
