@@ -237,6 +237,7 @@ unsafe fn oram_init(tree: &mut Vec<Bucket>) {
     }
 }
 
+/*
 fn move_U2L(MU: &mut [i32], ML: &mut [i32]) {
     let mut i = 0;
     let mut j = 0;
@@ -289,7 +290,117 @@ fn move_U2L(MU: &mut [i32], ML: &mut [i32]) {
     }
     printdbgln!(1, "");
 }
+*/
 
+fn move_U2L_Obliviously(MU: &mut [i32], ML: &mut [i32]) {
+    let mut i = 0;
+    let mut j = 0;
+
+    printdbgln!(1, "===================================");
+    printdbgln!(1, "Moving upper to lower obliviously: ");
+    printdbgln!(1, "===================================");
+
+    printdbg!(1, "MU array before operation: ");
+    for element in MU.iter() {
+        printdbg!(1, "{}, ", element);
+    }
+    printdbgln!(1, "");
+
+    printdbg!(1, "ML array before operation: ");
+    for element in ML.iter() {
+        printdbg!(1, "{}, ", element);
+    }
+    printdbgln!(1, "");
+
+    while i < MU.len() {
+        j = 0;
+        while j < ML.len(){
+            /* Upper block is required to move to lower layer and lower layer is empty */
+            if (MU[i] == 1) && (ML[j] == 2) {
+                printdbgln!(1, "Moving down from MU[{}] to ML[{}]", i, j);
+                /* After movement, the upper layer becomes empty and lower layer becomes staty */ 
+                MU[i] = 2;
+                ML[j] = 0;
+            } else {
+                /* Keep the elements same */
+                MU[i] = MU[i];
+                ML[j] = ML[j];
+            }
+            j += 1;
+        }
+
+        i += 1;
+    }
+
+    // Using a for loop to iterate through the array
+    printdbg!(1, "MU array after operation: ");
+    for element in MU.iter() {
+        printdbg!(1, "{}, ", element);
+    }
+    printdbgln!(1, "");
+
+    printdbg!(1, "ML array after operation: ");
+    for element in ML.iter() {
+        printdbg!(1, "{}, ", element);
+    }
+    printdbgln!(1, "");
+}
+
+fn move_L2U_Obliviously(MU: &mut [i32], ML: &mut [i32]) {
+    let mut i = 0;
+    let mut j = 0;
+
+    printdbgln!(1, "==================================");
+    printdbgln!(1, "Moving lower to upper obliviously:");
+    printdbgln!(1, "==================================");
+
+    printdbg!(1, "MU array before operation: ");
+    for element in MU.iter() {
+        printdbg!(1, "{}, ", element);
+    }
+    printdbgln!(1, "");
+
+    printdbg!(1, "ML array before operation: ");
+    for element in ML.iter() {
+        printdbg!(1, "{}, ", element);
+    }
+    printdbgln!(1, "");
+
+    while i < ML.len() {
+        j = 0;
+        while j < MU.len(){
+            /* Lower block is required to move to upper layer and upper layer is empty */
+            if (ML[i] == 1) && (MU[j] == 2) {
+                printdbgln!(1, "Moving down from ML[{}] to MU[{}]", i, j);
+                /* After movement, the lower layer becomes empty and upper layer becomes stay */ 
+                ML[i] = 2;
+                MU[j] = 0;
+            } else {
+                /* Keep the elements same */
+                ML[i] = ML[i];
+                MU[j] = MU[j];
+            }
+            j += 1;
+        }
+
+        i += 1;
+    }
+
+    // Using a for loop to iterate through the array
+    printdbg!(1, "MU array after operation: ");
+    for element in MU.iter() {
+        printdbg!(1, "{}, ", element);
+    }
+    printdbgln!(1, "");
+
+    printdbg!(1, "ML array after operation: ");
+    for element in ML.iter() {
+        printdbg!(1, "{}, ", element);
+    }
+    printdbgln!(1, "");
+}
+
+/*
 fn move_L2U(MU: &mut [i32], ML: &mut [i32]) {
     let mut i = 0;
     let mut j = 0;
@@ -297,6 +408,7 @@ fn move_L2U(MU: &mut [i32], ML: &mut [i32]) {
     printdbgln!(1, "======================");
     printdbgln!(1, "Moving lower to upper:");
     printdbgln!(1, "======================");
+
 
     printdbg!(1, "MU array before operation: ");
     for element in MU.iter() {
@@ -343,6 +455,7 @@ fn move_L2U(MU: &mut [i32], ML: &mut [i32]) {
     }
     printdbgln!(1, "");
 }
+*/
 
 fn process_swap(MU: &mut [i32], ML: &mut [i32]) {
     let mut i = 0;
@@ -398,6 +511,60 @@ fn process_swap(MU: &mut [i32], ML: &mut [i32]) {
     printdbgln!(1, "");
 }
 
+fn process_swap_Obliviously(MU: &mut [i32], ML: &mut [i32]) {
+    let mut i = 0;
+    let mut j = 0;
+
+    printdbgln!(1, "================================");
+    printdbgln!(1, "Performing swapping obliviously:");
+    printdbgln!(1, "================================");
+
+    printdbg!(1, "MU array before operation: ");
+    for element in MU.iter() {
+        printdbg!(1, "{}, ", element);
+    }
+    printdbgln!(1, "");
+
+    printdbg!(1, "ML array before operation: ");
+    for element in ML.iter() {
+        printdbg!(1, "{}, ", element);
+    }
+    printdbgln!(1, "");
+
+    while i < MU.len() {
+        j = 0;
+        while j < ML.len(){
+            /* Upper block is required to move to lower layer and lower layer is required to move upper layer */
+            if (MU[i] == 1) && (ML[j] == 1) {
+                printdbgln!(1, "Swapping between MU[{}] to ML[{}]", i, j);
+                /* After movement, both the upper and lower slots become stable */ 
+                MU[i] = 0;
+                ML[j] = 0;
+            } else {
+                /* Keep the elements same */
+                MU[i] = MU[i];
+                ML[j] = ML[j];
+            }
+            j += 1;
+        }
+
+        i += 1;
+    }
+
+    // Using a for loop to iterate through the array
+    printdbg!(1, "MU array after operation: ");
+    for element in MU.iter() {
+        printdbg!(1, "{}, ", element);
+    }
+    printdbgln!(1, "");
+
+    printdbg!(1, "ML array after operation: ");
+    for element in ML.iter() {
+        printdbg!(1, "{}, ", element);
+    }
+    printdbgln!(1, "");
+}
+
 fn BG() {
     let mut MU = [1, 1, 1, 1, 1, 0, 0, 0, 0, 0]; // Movement of the upper bucket
     let mut ML = [0, 0, 2, 2, 2, 0, 0, 1, 0, 0]; // Movement of the lower bucket
@@ -405,7 +572,7 @@ fn BG() {
     //let mut MU = [1,1,1,1,1,1,2,1,1,1]; // Movement of the upper bucket
     //let mut ML = [1,1,1,2,1,1,1,1,0,1]; // Movement of the lower bucket
 
-    move_U2L(&mut MU, &mut ML);
-    move_L2U(&mut MU, &mut ML);
-    process_swap(&mut MU, &mut ML);
+    process_swap_Obliviously(&mut MU, &mut ML);
+    move_U2L_Obliviously(&mut MU, &mut ML);
+    move_L2U_Obliviously(&mut MU, &mut ML);
 }
