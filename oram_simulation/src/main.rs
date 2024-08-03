@@ -1,5 +1,5 @@
 use tfhe::prelude::*;
-use tfhe::{generate_keys, set_server_key, ConfigBuilder, FheInt32};
+use tfhe::{generate_keys, set_server_key, ConfigBuilder, FheInt32, FheBool};
 extern crate chrono;
 use chrono::Local;
 use rand::distributions::{Distribution, Uniform};
@@ -8,6 +8,7 @@ use rand::Rng;
 use std::collections::VecDeque;
 use std::collections::HashMap;
 use std::mem::MaybeUninit;
+use tfhe::prelude::*;
 
 macro_rules! printdbgln {
     ($dlvl:expr, $($arg:tt)*) => {
@@ -165,30 +166,8 @@ fn main() {
 
     unsafe {
         //oram_exp();
-        BG();
-    }
-}
-
-unsafe fn experimental_function() {
-    let mut rng = rand::thread_rng();
-    let range = Uniform::new_inclusive(8, 15);
-    let mut list: Vec<u32> = Vec::new();
-
-    for _ in 0..1000000 {
-        list.push(rng.sample(range));
-    }
-
-    // Create a histogram (a HashMap to count occurrences)
-    let mut histogram = HashMap::new();
-
-    for &number in &list {
-        let count = histogram.entry(number).or_insert(0);
-        *count += 1;
-    }
-
-    // Print the histogram
-    for (value, count) in &histogram {
-        println!("{}: {}", value, count);
+        //BG();
+        experimental_function();
     }
 }
 
@@ -576,3 +555,50 @@ fn BG() {
     move_U2L_Obliviously(&mut MU, &mut ML);
     move_L2U_Obliviously(&mut MU, &mut ML);
 }
+
+unsafe fn experimental_function() {
+    // Basic configuration to use homomorphic integers
+    let config = ConfigBuilder::default().build();
+ 
+    // Key generation
+    let (client_key, server_keys) = generate_keys(config);
+    
+    let clear_a = 32i32;
+    let clear_b = -45i32;
+    
+    // Encrypting the input data using the (private) client_key
+    // FheInt32: Encrypted equivalent to i32
+    let mut encrypted_a = FheInt32::encrypt(clear_a, &client_key);
+    let mut encrypted_b = FheInt32::encrypt(clear_b, &client_key);
+    let encBit = FheBool::encrypt(true, &client_key);
+    printdbgln!(1, "Line: {}", line!());
+    
+    // On the server side:
+    set_server_key(server_keys);
+    printdbgln!(1, "Line: {}", line!());
+ 
+    /*
+    let mut encrypted_tmp = encrypted_a.clone();
+
+    encrypted_a = encBit.select(&encrypted_b, &encrypted_a);
+
+    encrypted_b = encBit.select(&encrypted_tmp, &encrypted_b);
+    
+    let clear_a: i32 = encrypted_a.decrypt(&client_key);
+    let clear_b: i32 = encrypted_b.decrypt(&client_key);
+    */
+    cswap_blk(&encBit, &mut encrypted_a, &mut encrypted_b);
+
+    printdbgln!(1, "Line: {}", line!());
+ 
+    printdbgln!(1, "After swapping the values are: a={} and b={}", clear_a, clear_b);
+ 
+ }
+
+ unsafe fn cswap_blk(encBit:&FheBool, encA:&mut FheInt32, encB:&mut FheInt32) {
+    let mut encTmp = encA.clone();
+
+    *encA = encBit.select(&encA, &encB);
+
+    *encB = encBit.select(&encA, &encB);
+ }
