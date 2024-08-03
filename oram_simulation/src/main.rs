@@ -1,5 +1,7 @@
+use tfhe::boolean::backward_compatibility::client_key;
+use tfhe::integer::bigint::U1024;
 use tfhe::prelude::*;
-use tfhe::{generate_keys, set_server_key, ConfigBuilder, FheInt32, FheBool};
+use tfhe::{generate_keys, set_server_key, ConfigBuilder, FheInt32, FheUint1024, FheBool, FheUint, FheUint1024Id};
 extern crate chrono;
 use chrono::Local;
 use rand::distributions::{Distribution, Uniform};
@@ -9,6 +11,7 @@ use std::collections::VecDeque;
 use std::collections::HashMap;
 use std::mem::MaybeUninit;
 use tfhe::prelude::*;
+use tfhe::ClientKey;
 
 macro_rules! printdbgln {
     ($dlvl:expr, $($arg:tt)*) => {
@@ -24,6 +27,13 @@ macro_rules! printdbg {
             print!($($arg)*);
         }
     }
+}
+
+//64bit(8byte)*128=1KB block
+macro_rules! NUMu64 {
+    () => {
+        2//Temporarily it is changed to 2
+    };
 }
 
 static mut N: u32 = 8;
@@ -44,7 +54,7 @@ struct m {
 }
 struct blk {
     m: m,
-    d: [u32; 2],
+    d: Vec<FheUint<FheUint1024Id>>,
 }
 
 #[derive(Debug)]
@@ -61,6 +71,33 @@ struct Stat {
     avg: f64,
     var: f64,    //Variance of occupancy
     sq_avg: f64, //Average of the square of the occupancy, required for calculating the variance
+}
+
+impl blk {
+    // Method to create a new Bucket
+    fn new(id: u32, lf: u32) -> Self {
+        blk {
+            m: m {
+                id: 0,
+                lf: 0,
+            },
+            d: Vec::new(),
+        }
+    }
+
+    /* Fill all NUMu64! with same data */
+    fn fillData(&mut self, d:FheUint1024){
+        for _ in 0..NUMu64!(){
+            self.d.push(d.clone());
+        }
+    }
+
+    /* Print data */
+    fn printData(&mut self, client_key:&ClientKey){
+        for _ in 0..NUMu64!(){
+            //self.d.push(d.clone());
+        }
+    }
 }
 
 impl Bucket {
@@ -563,9 +600,17 @@ unsafe fn experimental_function() {
     // Key generation
     let (client_key, server_keys) = generate_keys(config);
     
-    let clear_a = 32i32;
-    let clear_b = -45i32;
-    
+    let mut clear_a = 0x1;
+    let mut clear_b = 0x2;
+
+    //Create block A
+    let mut blkA = blk::new(0, 0);
+    blkA.fillData(FheUint1024::encrypt(0_u64, &client_key));
+
+    //Create block B
+    let mut blkB = blk::new(1, 0);
+    blkB.fillData(FheUint1024::encrypt(1_u64, &client_key));
+
     // Encrypting the input data using the (private) client_key
     // FheInt32: Encrypted equivalent to i32
     let mut encrypted_a = FheInt32::encrypt(clear_a, &client_key);
@@ -587,18 +632,24 @@ unsafe fn experimental_function() {
     let clear_a: i32 = encrypted_a.decrypt(&client_key);
     let clear_b: i32 = encrypted_b.decrypt(&client_key);
     */
-    cswap_blk(&encBit, &mut encrypted_a, &mut encrypted_b);
+    cswap_blk(&encBit, &mut blkA, &mut blkB);
+    //cswap_blk(&encBit, &mut encrypted_a, &mut encrypted_b);
 
     printdbgln!(1, "Line: {}", line!());
+
+    clear_a = encrypted_a.decrypt(&client_key);
+    clear_b = encrypted_b.decrypt(&client_key);
  
     printdbgln!(1, "After swapping the values are: a={} and b={}", clear_a, clear_b);
  
  }
 
- unsafe fn cswap_blk(encBit:&FheBool, encA:&mut FheInt32, encB:&mut FheInt32) {
-    let mut encTmp = encA.clone();
+ unsafe fn cswap_blk(encBit:&FheBool, blkA:&mut blk, blkB:&mut blk) {
+    //let mut encTmp = blkA.clone();
 
-    *encA = encBit.select(&encA, &encB);
-
-    *encB = encBit.select(&encA, &encB);
+    for i in 0..NUMu64!(){
+        blkA.d[i] = encBit.select(&blkB.d[i], &blkA.d[i]);
+        //*blkB = encBit.select(&encTmp, &blkB);
+        //*blkB = encBit.select(&encTmp, &blkB);   
+    }
  }
