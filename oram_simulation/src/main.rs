@@ -50,13 +50,11 @@ static mut rate_ratio: u32 = 10; //Ratio of server's processing : Client's proce
 static mut two: u32 = 2;
 static mut idx: usize = 0;
 static mut tu: u64 = 0; /* Count of time unit */
-static mut read_failure_cnt: u64 = 0; /* The number of times the read operation failed */
+static mut read_underflow_cnt: u64 = 0; /* The number of times the read operation failed */
 static mut write_failure_cnt: u64 = 0; /* The number of times the write operation failed */
 static mut bg_failure_cnt: u64 = 0; /* The number of times the background operation caused buffer overflow */
 static mut max_burst_cnt: u64 = 0; /* The number of blocks the client retrives in a burst */
 static mut min_relax_cnt: u64 = 0; /* The amount of time (in terms of step processing), the client relaxes after each burst */
-
-
 struct m {
     id: u32,
     lf: u32,
@@ -347,13 +345,13 @@ unsafe fn AvailabilityTS(Tcur: u32, x: u32, w: u32) -> u32 {
  */
 unsafe fn oram_exp() {
     /* Set experimentation parameters fist */
-    N = two.pow(20);//1GB database
+    N = two.pow(26);//256GB database = 2^26 of 4KB blocks. More that is not possible to analyze in compute canada hardware.
     R = 1;
     Z = 6;//Number of slots in a bucket
     C = Z/2;
-    rate_ratio = 10;
-    max_burst_cnt = 10*1024;//Assume each block is of 1KB and each burst is of 10MB
-    min_relax_cnt = 5*60*1000;//Assume it is 5 minutes and 100 edges (i.e., 2Z*1000*1KB = 12MB/s) are processed each second
+    rate_ratio = 1;
+    max_burst_cnt = 1024*256;//Assume burst size is of 12MB = 12*256 blocks
+    min_relax_cnt = 5*60*1;//Assume it is 5 minutes and only 1 edge is processed per second (i.e., 1*2Z*4KB = 48KB/s)
 
     /* Derived parameters */
     L = ((N as f64).log2() as u32) + 1;
@@ -361,7 +359,7 @@ unsafe fn oram_exp() {
 
     /* Local variable */
     let mut edge: u32; /* Determines which edge to process now */
-    let ITR_CNT: u64 = 500000; /* The experiment will run until t reaches itr_cnt */
+    let ITR_CNT: u64 = two.pow(20) as u64; /* The experiment will run until t reaches itr_cnt */
     let mut node_que: VecDeque<u32> = VecDeque::new(); /* Queue of parent nodes */
     let mut b: u32; /* Holds the label of the current bucket */
     let mut p: usize; /* Holds the label of the parent node of the current edge */
@@ -431,10 +429,10 @@ unsafe fn oram_exp() {
             node_que.push_front(2 * p); //Actually 2p bucket. -1 becasue of 0 index
             node_que.push_front(2 * p + 1); //2p+1
 
-            bg_process(&mut tree, p, 2 * p);
+            permute(&mut tree, p, 2 * p);
             tu += 1;
 
-            bg_process(&mut tree, p, 2 * p + 1);
+            permute(&mut tree, p, 2 * p + 1);
             tu += 1;
         } else {
             printdbgln!(0, "Queue is empty");
@@ -469,6 +467,7 @@ unsafe fn oram_write(
         tree[w as usize - 1].insert(x);
         tree[w as usize - 1].calc_stat(); //Update statistics
     } else {
+        /* Cannot write to the block, as it is already full */
         write_failure_cnt += 1;
     }
 
@@ -494,7 +493,7 @@ unsafe fn oram_read(
         tree[r as usize - 1].blocks.remove(0);
         tree[r as usize - 1].calc_stat(); //Update statistics
     } else {
-        read_failure_cnt += 1;//In real scenario, this will not happen unless the server misbehaves. Because, the client will not issue read in that case.
+        read_underflow_cnt += 1;//In real scenario, this will not happen unless the server misbehaves. Because, the client will not issue read in that case.
         success = false;
     }
     tree[r as usize - 1].stat.r_cnt += 1;
@@ -857,15 +856,16 @@ fn BG() {
 unsafe fn oram_stat_print(tree: &mut Vec<Bucket>) {
     printdbgln!(1, "Bucket\t\ta_cnt\tr_cnt\tw_cnt\tx_cnt\tavg\tvar\tmax\tout_up\tout_lft\tout_rgt\tin_up\tin_lft\tin_rgt\tsty");
 
+    /*
     for b in 1..=(two.pow(L) - 1) {
         tree[b as usize - 1].print_stat();
-    }
+    }*/
 
-    printdbgln!(1, "Read failure count: {}, write failure count: {}, background failure count: {}", read_failure_cnt, write_failure_cnt, bg_failure_cnt);
+    printdbgln!(1, "Read underflow count: {}, write failure count: {}, background failure count: {}", read_underflow_cnt, write_failure_cnt, bg_failure_cnt);
 }
 
 /* Inspired from the movement algorithm in sumit_draft.docx */
-unsafe fn bg_process(tree: &mut Vec<Bucket>, upper: u32, lower: u32) {
+unsafe fn permute(tree: &mut Vec<Bucket>, upper: u32, lower: u32) {
     let mut l_upper: u32 = ((upper as f64).log2() as u32) + 1;
     let mut l_lower: u32 = l_upper + 1;
     let mut blk_num: u32;
