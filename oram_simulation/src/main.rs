@@ -1,14 +1,17 @@
 use tfhe::boolean::backward_compatibility::client_key;
 use tfhe::integer::bigint::U1024;
 use tfhe::prelude::*;
-use tfhe::{generate_keys, set_server_key, ConfigBuilder, FheInt32, FheUint1024, FheBool, FheUint, FheUint1024Id};
+use tfhe::{
+    generate_keys, set_server_key, ConfigBuilder, FheBool, FheInt32, FheUint, FheUint1024,
+    FheUint1024Id,
+};
 extern crate chrono;
 use chrono::Local;
 use rand::distributions::{Distribution, Uniform};
 use rand::rngs::ThreadRng;
 use rand::Rng;
-use std::collections::VecDeque;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::mem::MaybeUninit;
 use tfhe::prelude::*;
 use tfhe::ClientKey;
@@ -32,7 +35,7 @@ macro_rules! printdbg {
 //64bit(8byte)*128=1KB block
 macro_rules! NUMu64 {
     () => {
-        2//Temporarily it is changed to 2
+        2 //Temporarily it is changed to 2
     };
 }
 
@@ -42,9 +45,9 @@ static mut R: u32 = 1;
 static mut C: u32 = 1; /* Initial number of replicas */
 static mut Z: u32 = 1;
 static mut B: u32 = 4096; /* Common block size is: 4KB
-But RLWE can encrypt 3KB per ciphertext. 
-So, block size must be set to multiple of 3KB.
-Moreover, some place must be kept reserved for storing metadata */
+                          But RLWE can encrypt 3KB per ciphertext.
+                          So, block size must be set to multiple of 3KB.
+                          Moreover, some place must be kept reserved for storing metadata */
 static mut epoch: u32 = 14; //2(N-1)
 static mut rate_ratio: u32 = 10; //Ratio of server's processing : Client's processing
 static mut two: u32 = 2;
@@ -52,9 +55,14 @@ static mut idx: usize = 0;
 static mut tu: u64 = 0; /* Count of time unit */
 static mut read_underflow_cnt: u64 = 0; /* The number of times the read operation failed */
 static mut write_failure_cnt: u64 = 0; /* The number of times the write operation failed */
-static mut bg_failure_cnt: u64 = 0; /* The number of times the background operation caused buffer overflow */
+static mut routing_congestion_cnt: u64 = 0; /* The number of times the background operation caused buffer overflow */
 static mut max_burst_cnt: u64 = 0; /* The number of blocks the client retrives in a burst */
 static mut min_relax_cnt: u64 = 0; /* The amount of time (in terms of step processing), the client relaxes after each burst */
+static mut global_max_bucket_load: u32 = 0; /* Maximum load occurred in any bucket */
+static mut total_num_removed: u64 = 0;/* Total number of blocks removed from its leaf location */
+static mut total_num_placed: u64 = 0;/* How many number of blocks are returned to place by the routing process */
+static mut last_placement_tu: u64 = 0;/* When the last block is placed to its destined leaf */
+
 struct m {
     id: u32,
     lf: u32,
@@ -94,24 +102,21 @@ impl blk {
     // Method to create a new Bucket
     fn new(id: u32, lf: u32) -> Self {
         blk {
-            m: m {
-                id: 0,
-                lf: 0,
-            },
+            m: m { id: 0, lf: 0 },
             d: Vec::new(),
         }
     }
 
     /* Fill all NUMu64! with same data */
-    fn fillData(&mut self, d:FheUint1024){
-        for _ in 0..NUMu64!(){
+    fn fillData(&mut self, d: FheUint1024) {
+        for _ in 0..NUMu64!() {
             self.d.push(d.clone());
         }
     }
 
     /* Print data */
-    fn printData(&mut self, client_key:&ClientKey){
-        for _ in 0..NUMu64!(){
+    fn printData(&mut self, client_key: &ClientKey) {
+        for _ in 0..NUMu64!() {
             //self.d.push(d.clone());
         }
     }
@@ -126,7 +131,7 @@ impl Bucket {
                 access_cnt: 0,
                 w_cnt: 0,
                 r_cnt: 0,
-                x_cnt: 0,                
+                x_cnt: 0,
                 out_up_cnt: 0,
                 out_lft_cnt: 0,
                 out_rgt_cnt: 0,
@@ -186,13 +191,19 @@ impl Bucket {
 
         if current > self.stat.max {
             self.stat.max = current;
+
+            unsafe {
+                if current > global_max_bucket_load {
+                    global_max_bucket_load = current;
+                }
+            }
         }
 
         Stat {
             access_cnt: self.stat.access_cnt,
             w_cnt: self.stat.w_cnt,
             r_cnt: self.stat.r_cnt,
-            x_cnt: self.stat.x_cnt,            
+            x_cnt: self.stat.x_cnt,
             out_up_cnt: self.stat.out_up_cnt,
             out_lft_cnt: self.stat.out_lft_cnt,
             out_rgt_cnt: self.stat.out_rgt_cnt,
@@ -202,7 +213,7 @@ impl Bucket {
             sty_cnt: self.stat.sty_cnt,
             max: self.stat.max,
             avg: self.stat.avg,
-            var: self.stat.var,    //Variance of occupancy
+            var: self.stat.var,       //Variance of occupancy
             sq_avg: self.stat.sq_avg, //Average of the square of the occupancy, required for calculating the variance
         }
     }
@@ -241,15 +252,14 @@ impl Bucket {
             self.stat.in_up_cnt,
             self.stat.in_lft_cnt,
             self.stat.in_rgt_cnt,
-            self.stat.sty_cnt
-            //self.blocks,
+            self.stat.sty_cnt //self.blocks,
         );
 
         Stat {
             access_cnt: self.stat.access_cnt,
             w_cnt: self.stat.w_cnt,
             r_cnt: self.stat.r_cnt,
-            x_cnt: self.stat.x_cnt,            
+            x_cnt: self.stat.x_cnt,
             out_up_cnt: self.stat.out_up_cnt,
             out_lft_cnt: self.stat.out_lft_cnt,
             out_rgt_cnt: self.stat.out_rgt_cnt,
@@ -259,12 +269,11 @@ impl Bucket {
             sty_cnt: self.stat.sty_cnt,
             max: self.stat.max,
             avg: self.stat.avg,
-            var: self.stat.var,    //Variance of occupancy
+            var: self.stat.var,       //Variance of occupancy
             sq_avg: self.stat.sq_avg, //Average of the square of the occupancy, required for calculating the variance
         }
     }
 }
-
 
 fn main() {
     let mut M = m { id: 5, lf: 5 };
@@ -291,8 +300,73 @@ fn main() {
 
         //tfhe_exp();
 
-        AvailabilityTS(Tcur, x, w);
-        oram_exp();
+        //AvailabilityTS(Tcur, x, w);
+        
+        //Comment out some experiments
+        if false {
+        /* Experiment 1 */
+        oram_exp(two.pow(26), /* Kept block size 4KB as per other ORAM paper
+                                         256GB remote storage.
+                                         2^26*4KB blocks. With compute canada resource cannot simulate larger remote storage
+                                      */
+        6, /* Number of slots. Kept is same as PathORAM */
+        1, /* Client and server has same processing speed. Worst case scenario.
+                           in general, the server is much faster */
+        (1024*256), /* 1GB=1024*256 4KB blocks */
+        (60*60*1), /* Client will relax for 60 minutes. In the meantime, the server will keep routing.
+                                     Assumed, the server processes one edge per second.
+                                     i.e., 2Z blocks each having 4KB
+                                     Which turns out to be server processes: 2*6*4KB = 48KB/s */
+        two.pow(20) as u64);/* Experiment runs for 2^29 steps.
+                                             i.e., in this case more than server capacity number of blocks are accessed */
+
+        /* Experiment 2 */
+        oram_exp(two.pow(26), /* Kept block size 4KB as per other ORAM paper
+                                         256GB remote storage.
+                                         2^26*4KB blocks. With compute canada resource cannot simulate larger remote storage
+                                      */
+        6, /* Number of slots. Kept is same as PathORAM */
+        1, /* Client and server has same processing speed. Worst case scenario.
+                           in general, the server is much faster */
+        (12*256), /* 12MB=12*256 4KB blocks */
+        (5*60*1), /* Client will relax for 5 minutes. In the meantime, the server will keep routing.
+                                     Assumed, the server processes one edge per second.
+                                     i.e., 2Z blocks each having 4KB
+                                     Which turns out to be server processes: 2*6*4KB = 48KB/s */
+        two.pow(20) as u64);/* Experiment runs for 2^29 steps.
+                                             i.e., in this case more than server capacity number of blocks are accessed */
+
+
+        /* Experiment 3 */
+        oram_exp(two.pow(26), /* Kept block size 4KB as per other ORAM paper
+                                         256GB remote storage.
+                                         2^26*4KB blocks. With compute canada resource cannot simulate larger remote storage
+                                      */
+        6, /* Number of slots. Kept is same as PathORAM */
+        1, /* Client and server has same processing speed. Worst case scenario.
+                           in general, the server is much faster */
+        (12*256), /* 12MB=12*256 4KB blocks */
+        (5*60*1), /* Client will relax for 5 minutes. In the meantime, the server will keep routing.
+                                     Assumed, the server processes one edge per second.
+                                     i.e., 2Z blocks each having 4KB
+                                     Which turns out to be server processes: 2*6*4KB = 48KB/s */
+        two.pow(29) as u64);/* Experiment runs for 2^29 steps.
+                                             i.e., in this case more than server capacity number of blocks are accessed */
+        }
+
+        /* Experiment 4 */
+        oram_exp(two.pow(26), /* Kept block size 4KB as per other ORAM paper
+                                         256GB remote storage.
+                                         2^26*4KB blocks. With compute canada resource cannot simulate larger remote storage
+                                      */
+        6, /* Number of slots. Kept is same as PathORAM */
+        1, /* Client and server has same processing speed. Worst case scenario.
+                           in general, the server is much faster */
+        (10240*256), /* 10GB=10240*256 4KB blocks */
+        (two.pow(29) as u64 - (5*60*1)as u64) as u64, /* After fetching 10GB data, the client will not access anymore */
+        two.pow(29) as u64);/* Experiment runs for 2^29 steps.
+                                             i.e., in this case more than server capacity number of blocks are accessed */
+
     }
 }
 
@@ -342,24 +416,23 @@ unsafe fn AvailabilityTS(Tcur: u32, x: u32, w: u32) -> u32 {
 - We can think each bucket as a queue, from S. Keshav's video, I learnt that for maintaining a stable situation the arrival rate must be less than
   the departure rate. How to calculate the arrival and departure rates? I can see that the #arrival = #departure as expected
 - With the increase of N, write failure increases. N=2^15 failure 57311/50000000. N=2^10: 2960/50000000. N=2^4: 1/50000000.
- */
-unsafe fn oram_exp() {
+*/
+unsafe fn oram_exp(_N: u32, _Z: u32, _rate_ratio: u32, _max_burst_cnt: u64, _min_relax_cnt: u64, _ITR_CNT: u64) {
     /* Set experimentation parameters fist */
-    N = two.pow(26);//256GB database = 2^26 of 4KB blocks. More that is not possible to analyze in compute canada hardware.
+    N = _N;
     R = 1;
-    Z = 6;//Number of slots in a bucket
-    C = Z/2;
-    rate_ratio = 1;
-    max_burst_cnt = 1024*256;//Assume burst size is of 12MB = 12*256 blocks
-    min_relax_cnt = 5*60*1;//Assume it is 5 minutes and only 1 edge is processed per second (i.e., 1*2Z*4KB = 48KB/s)
+    Z = _Z; //Number of slots in a bucket
+    C = Z / 2;
+    rate_ratio = _rate_ratio;
+    max_burst_cnt = _max_burst_cnt; //Assume burst size is of 12MB = 12*256 blocks
+    min_relax_cnt = _min_relax_cnt; //Assume it is 5 minutes and only 1 edge is processed per second (i.e., 1*2Z*4KB = 48KB/s)
 
     /* Derived parameters */
     L = ((N as f64).log2() as u32) + 1;
     epoch = 2 * (N - 1);
 
     /* Local variable */
-    let mut edge: u32; /* Determines which edge to process now */
-    let ITR_CNT: u64 = two.pow(20) as u64; /* The experiment will run until t reaches itr_cnt */
+    let ITR_CNT: u64 = _ITR_CNT; /* The experiment will run until t reaches itr_cnt */
     let mut node_que: VecDeque<u32> = VecDeque::new(); /* Queue of parent nodes */
     let mut b: u32; /* Holds the label of the current bucket */
     let mut p: usize; /* Holds the label of the parent node of the current edge */
@@ -370,13 +443,14 @@ unsafe fn oram_exp() {
 
     printdbgln!(
         1,
-        "Value of N = {}, R = {}, L = {}, Z = {}, epoch = {}, rate_ratio = {}",
+        "Experimentation started at: {} with parameters: N = {}, Z = {}, rate_ratio = {}, max_burst_cnt = {}, min_relax_cnt = {}, ITR_CNT = {}",
+        Local::now().format("%Y-%m-%d %H:%M:%S.%6f").to_string(),
         N,
-        R,
-        L,
         Z,
-        epoch,
-        rate_ratio
+        rate_ratio,
+        max_burst_cnt,
+        min_relax_cnt,
+        ITR_CNT
     );
 
     /* Loop from 1 to 2N - 1 */
@@ -398,22 +472,31 @@ unsafe fn oram_exp() {
 
     node_que.push_front(tree[0].b); /* At first push the root bucket. Located in tree[0], but has label = 1 */
     tu = 0; /* Initialize with time count 0 */
-    edge = 1; /* Initialize with edge count 1 */
 
     /* Do the experiment until a specified time */
     while tu < ITR_CNT {
         if (fetched_blk_cnt < max_burst_cnt) {
-            if (tu % (rate_ratio as u64)) == 0 {
-                let mut read_success: bool;
-                /* Perform one read */
-                read_success = oram_read(&mut randomness, &mut r_dist, &mut tree);
-    
-                /* Perform one write */
-                if (read_success == true){
-                    oram_write(&mut randomness, &mut x_dist, &mut w_dist, &mut tree);
-                }
+            //As each iteration, two edges are processed to make the rate same, two blocks are accessed as well
+
+            //if (tu % (rate_ratio as u64)) == 0 {
+            let mut read_success: bool;
+            /* Perform one read */
+            read_success = oram_remove(&mut randomness, &mut r_dist, &mut tree);
+
+            /* Perform one write */
+            if (read_success == true) {
+                oram_insert(&mut randomness, &mut x_dist, &mut w_dist, &mut tree);
             }
-            
+
+            /* Perform second read */
+            read_success = oram_remove(&mut randomness, &mut r_dist, &mut tree);
+
+            /* Perform second write */
+            if (read_success == true) {
+                oram_insert(&mut randomness, &mut x_dist, &mut w_dist, &mut tree);
+            }
+            //}
+
             fetched_blk_cnt += 1;
         } else {
             if (relax_cnt < min_relax_cnt) {
@@ -448,10 +531,12 @@ unsafe fn oram_exp() {
 
     oram_stat_print(&mut tree);
 
+    printdbgln!(1, "Experimentation ended at: {}", Local::now().format("%Y-%m-%d %H:%M:%S.%6f").to_string());
+
     //experimental_function();
 }
 
-unsafe fn oram_write(
+unsafe fn oram_insert(
     mut randomness: &mut ThreadRng,
     mut x_dist: &mut Uniform<u32>,
     mut w_dist: &mut Uniform<u32>,
@@ -473,10 +558,9 @@ unsafe fn oram_write(
 
     tree[w as usize - 1].stat.w_cnt += 1;
     tree[x as usize - 1].stat.x_cnt += 1;
-
 }
 
-unsafe fn oram_read(
+unsafe fn oram_remove(
     mut randomness: &mut ThreadRng,
     mut r_dist: &mut Uniform<u32>,
     tree: &mut Vec<Bucket>,
@@ -485,6 +569,7 @@ unsafe fn oram_read(
 
     //For experiment, randomly select a leaf node to read
     let r = randomness.sample(*r_dist);
+    total_num_removed += 1;
 
     //Bucket with label r is stored in location (r-1)
     //For experimentation purpose always read the first item from the bucket
@@ -493,7 +578,7 @@ unsafe fn oram_read(
         tree[r as usize - 1].blocks.remove(0);
         tree[r as usize - 1].calc_stat(); //Update statistics
     } else {
-        read_underflow_cnt += 1;//In real scenario, this will not happen unless the server misbehaves. Because, the client will not issue read in that case.
+        read_underflow_cnt += 1; //In real scenario, this will not happen unless the server misbehaves. Because, the client will not issue read in that case.
         success = false;
     }
     tree[r as usize - 1].stat.r_cnt += 1;
@@ -590,11 +675,11 @@ fn move_U2L_Obliviously(MU: &mut [i32], ML: &mut [i32]) {
 
     while i < MU.len() {
         j = 0;
-        while j < ML.len(){
+        while j < ML.len() {
             /* Upper block is required to move to lower layer and lower layer is empty */
             if (MU[i] == 1) && (ML[j] == 2) {
                 printdbgln!(1, "Moving down from MU[{}] to ML[{}]", i, j);
-                /* After movement, the upper layer becomes empty and lower layer becomes staty */ 
+                /* After movement, the upper layer becomes empty and lower layer becomes staty */
                 MU[i] = 2;
                 ML[j] = 0;
             } else {
@@ -644,11 +729,11 @@ fn move_L2U_Obliviously(MU: &mut [i32], ML: &mut [i32]) {
 
     while i < ML.len() {
         j = 0;
-        while j < MU.len(){
+        while j < MU.len() {
             /* Lower block is required to move to upper layer and upper layer is empty */
             if (ML[i] == 1) && (MU[j] == 2) {
                 printdbgln!(1, "Moving down from ML[{}] to MU[{}]", i, j);
-                /* After movement, the lower layer becomes empty and upper layer becomes stay */ 
+                /* After movement, the lower layer becomes empty and upper layer becomes stay */
                 ML[i] = 2;
                 MU[j] = 0;
             } else {
@@ -809,11 +894,11 @@ fn process_swap_Obliviously(MU: &mut [i32], ML: &mut [i32]) {
 
     while i < MU.len() {
         j = 0;
-        while j < ML.len(){
+        while j < ML.len() {
             /* Upper block is required to move to lower layer and lower layer is required to move upper layer */
             if (MU[i] == 1) && (ML[j] == 1) {
                 printdbgln!(1, "Swapping between MU[{}] to ML[{}]", i, j);
-                /* After movement, both the upper and lower slots become stable */ 
+                /* After movement, both the upper and lower slots become stable */
                 MU[i] = 0;
                 ML[j] = 0;
             } else {
@@ -861,10 +946,14 @@ unsafe fn oram_stat_print(tree: &mut Vec<Bucket>) {
         tree[b as usize - 1].print_stat();
     }*/
 
-    printdbgln!(1, "Read underflow count: {}, write failure count: {}, background failure count: {}", read_underflow_cnt, write_failure_cnt, bg_failure_cnt);
+    /* Note: We are not calculating read error. i.e., the block must be availabel at some leaf but is not.
+     Basically, if the server is honest(but curious) then that value must be zero, if routing_congestion_cnt = 0
+    */
+
+    printdbgln!(1, "Read underflow count: {}, write failure count: {}, routing congestion count: {}, global max load: {}, total number of removals: {}, total number of placements: {}, last placement occurred at: {}", read_underflow_cnt, write_failure_cnt, routing_congestion_cnt, global_max_bucket_load, total_num_removed, total_num_placed, last_placement_tu);
 }
 
-/* Inspired from the movement algorithm in sumit_draft.docx */
+/* Inspired from the movement algorithm in sumit_draft.docx not according to the paper */
 unsafe fn permute(tree: &mut Vec<Bucket>, upper: u32, lower: u32) {
     let mut l_upper: u32 = ((upper as f64).log2() as u32) + 1;
     let mut l_lower: u32 = l_upper + 1;
@@ -882,12 +971,19 @@ unsafe fn permute(tree: &mut Vec<Bucket>, upper: u32, lower: u32) {
             tree[lower as usize - 1].insert(blk_num); /* Insert at the end of the lower bucket */
             change_flag = true;
 
-            if ((lower % 2) == 0 ){ //Even means, moving to the left child
+            if ((lower % 2) == 0) {
+                //Even means, moving to the left child
                 tree[upper as usize - 1].stat.out_lft_cnt += 1;
                 tree[lower as usize - 1].stat.in_up_cnt += 1;
             } else {
                 tree[upper as usize - 1].stat.out_rgt_cnt += 1;
                 tree[lower as usize - 1].stat.in_up_cnt += 1;
+            }
+
+            /* Means routing process is able to return back one block to its destined bucket */
+            if (l_lower == L) {
+                total_num_placed += 1;
+                last_placement_tu = tu;
             }
         } else {
             tree[upper as usize - 1].stat.sty_cnt += 1;
@@ -895,10 +991,11 @@ unsafe fn permute(tree: &mut Vec<Bucket>, upper: u32, lower: u32) {
     }
 
     /* Do not count the failure, when moving to the leaf bucket.
-       Already there are some problems regarding the lower buckets, as it is going beyond 24.
-     */
-    if (tree[lower as usize - 1].blocks.len() > Z as usize) && (l_lower < L) {
-        bg_failure_cnt += 1;
+      Already there are some problems regarding the lower buckets, as it is going beyond 24.
+    */
+    //if (tree[lower as usize - 1].blocks.len() > Z as usize) && (l_lower < L) {
+    if (tree[lower as usize - 1].blocks.len() > Z as usize) {
+        routing_congestion_cnt += 1;
     }
 
     /* Then move up, but before that store the original size of the lower bucket */
@@ -911,10 +1008,11 @@ unsafe fn permute(tree: &mut Vec<Bucket>, upper: u32, lower: u32) {
             blk_num = tree[lower as usize - 1].blocks.remove(i); /* Remove the block from the lower bucket */
             tree[upper as usize - 1].insert(blk_num); /* Insert at the end of the upper bucket */
             change_flag = true;
-            if ((lower % 2) == 0 ){ //Even means, moving to the left child
+            if ((lower % 2) == 0) {
+                //Even means, moving to the left child
                 tree[upper as usize - 1].stat.in_lft_cnt += 1;
                 tree[lower as usize - 1].stat.out_up_cnt += 1;
-            }else{
+            } else {
                 tree[upper as usize - 1].stat.in_rgt_cnt += 1;
                 tree[lower as usize - 1].stat.out_up_cnt += 1;
             }
@@ -924,7 +1022,7 @@ unsafe fn permute(tree: &mut Vec<Bucket>, upper: u32, lower: u32) {
     }
 
     if (tree[upper as usize - 1].blocks.len() > Z as usize) {
-        bg_failure_cnt += 1;
+        routing_congestion_cnt += 1;
     }
 
     /* Calculate the stat, whenever the node is accessed. Irrespective of change or no change */
@@ -941,10 +1039,10 @@ unsafe fn permute(tree: &mut Vec<Bucket>, upper: u32, lower: u32) {
 unsafe fn experimental_function() {
     // Basic configuration to use homomorphic integers
     let config = ConfigBuilder::default().build();
- 
+
     // Key generation
     let (client_key, server_keys) = generate_keys(config);
-    
+
     let mut clear_a = 0x1;
     let mut clear_b = 0x2;
 
@@ -962,18 +1060,18 @@ unsafe fn experimental_function() {
     let mut encrypted_b = FheInt32::encrypt(clear_b, &client_key);
     let encBit = FheBool::encrypt(true, &client_key);
     printdbgln!(1, "Line: {}", line!());
-    
+
     // On the server side:
     set_server_key(server_keys);
     printdbgln!(1, "Line: {}", line!());
- 
+
     /*
     let mut encrypted_tmp = encrypted_a.clone();
 
     encrypted_a = encBit.select(&encrypted_b, &encrypted_a);
 
     encrypted_b = encBit.select(&encrypted_tmp, &encrypted_b);
-    
+
     let clear_a: i32 = encrypted_a.decrypt(&client_key);
     let clear_b: i32 = encrypted_b.decrypt(&client_key);
     */
@@ -984,17 +1082,21 @@ unsafe fn experimental_function() {
 
     clear_a = encrypted_a.decrypt(&client_key);
     clear_b = encrypted_b.decrypt(&client_key);
- 
-    printdbgln!(1, "After swapping the values are: a={} and b={}", clear_a, clear_b);
- 
- }
 
- unsafe fn cswap_blk(encBit:&FheBool, blkA:&mut blk, blkB:&mut blk) {
+    printdbgln!(
+        1,
+        "After swapping the values are: a={} and b={}",
+        clear_a,
+        clear_b
+    );
+}
+
+unsafe fn cswap_blk(encBit: &FheBool, blkA: &mut blk, blkB: &mut blk) {
     //let mut encTmp = blkA.clone();
 
-    for i in 0..NUMu64!(){
+    for i in 0..NUMu64!() {
         blkA.d[i] = encBit.select(&blkB.d[i], &blkA.d[i]);
         //*blkB = encBit.select(&encTmp, &blkB);
-        //*blkB = encBit.select(&encTmp, &blkB);   
+        //*blkB = encBit.select(&encTmp, &blkB);
     }
- }
+}
