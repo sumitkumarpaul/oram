@@ -41,11 +41,20 @@ static mut L: u32 = 4;
 static mut R: u32 = 1;
 static mut C: u32 = 1; /* Initial number of replicas */
 static mut Z: u32 = 1;
+static mut B: u32 = 4096; /* Common block size is: 4KB
+But RLWE can encrypt 3KB per ciphertext. 
+So, block size must be set to multiple of 3KB.
+Moreover, some place must be kept reserved for storing metadata */
 static mut epoch: u32 = 14; //2(N-1)
 static mut rate_ratio: u32 = 10; //Ratio of server's processing : Client's processing
 static mut two: u32 = 2;
 static mut idx: usize = 0;
 static mut tu: u64 = 0; /* Count of time unit */
+static mut read_failure_cnt: u64 = 0; /* The number of times the read operation failed */
+static mut write_failure_cnt: u64 = 0; /* The number of times the write operation failed */
+static mut bg_failure_cnt: u64 = 0; /* The number of times the background operation caused buffer overflow */
+static mut max_burst_cnt: u64 = 0; /* The number of blocks the client retrives in a burst */
+static mut min_relax_cnt: u64 = 0; /* The amount of time (in terms of step processing), the client relaxes after each burst */
 
 
 struct m {
@@ -67,6 +76,16 @@ struct Bucket {
 #[derive(Debug)]
 struct Stat {
     access_cnt: u64,
+    w_cnt: u64,
+    r_cnt: u64,
+    x_cnt: u64,
+    out_up_cnt: u64,
+    out_lft_cnt: u64,
+    out_rgt_cnt: u64,
+    in_up_cnt: u64,
+    in_lft_cnt: u64,
+    in_rgt_cnt: u64,
+    sty_cnt: u64,
     max: u32,
     avg: f64,
     var: f64,    //Variance of occupancy
@@ -107,6 +126,16 @@ impl Bucket {
             b: label,
             stat: Stat {
                 access_cnt: 0,
+                w_cnt: 0,
+                r_cnt: 0,
+                x_cnt: 0,                
+                out_up_cnt: 0,
+                out_lft_cnt: 0,
+                out_rgt_cnt: 0,
+                in_up_cnt: 0,
+                in_lft_cnt: 0,
+                in_rgt_cnt: 0,
+                sty_cnt: 0,
                 max: 0,
                 avg: 0.0,
                 var: 0.0,    //Variance of occupancy
@@ -163,6 +192,16 @@ impl Bucket {
 
         Stat {
             access_cnt: self.stat.access_cnt,
+            w_cnt: self.stat.w_cnt,
+            r_cnt: self.stat.r_cnt,
+            x_cnt: self.stat.x_cnt,            
+            out_up_cnt: self.stat.out_up_cnt,
+            out_lft_cnt: self.stat.out_lft_cnt,
+            out_rgt_cnt: self.stat.out_rgt_cnt,
+            in_up_cnt: self.stat.in_up_cnt,
+            in_lft_cnt: self.stat.in_lft_cnt,
+            in_rgt_cnt: self.stat.in_rgt_cnt,
+            sty_cnt: self.stat.sty_cnt,
             max: self.stat.max,
             avg: self.stat.avg,
             var: self.stat.var,    //Variance of occupancy
@@ -177,19 +216,49 @@ impl Bucket {
             1,
             "Bucket[{}]:\t\
     {}\t\
+    {}\t\
+    {}\t\
+    {}\t\
     {:.2}\t\
     {:.2}\t\
+    {}\t\
+    {}\t\
+    {}\t\
+    {}\t\
+    {}\t\
+    {}\t\
+    {}\t\
     {}",
             self.b,
             self.stat.access_cnt,
+            self.stat.r_cnt,
+            self.stat.w_cnt,
+            self.stat.x_cnt,
             self.stat.avg,
             self.stat.var,
             self.stat.max,
+            self.stat.out_up_cnt,
+            self.stat.out_lft_cnt,
+            self.stat.out_rgt_cnt,
+            self.stat.in_up_cnt,
+            self.stat.in_lft_cnt,
+            self.stat.in_rgt_cnt,
+            self.stat.sty_cnt
             //self.blocks,
         );
 
         Stat {
             access_cnt: self.stat.access_cnt,
+            w_cnt: self.stat.w_cnt,
+            r_cnt: self.stat.r_cnt,
+            x_cnt: self.stat.x_cnt,            
+            out_up_cnt: self.stat.out_up_cnt,
+            out_lft_cnt: self.stat.out_lft_cnt,
+            out_rgt_cnt: self.stat.out_rgt_cnt,
+            in_up_cnt: self.stat.in_up_cnt,
+            in_lft_cnt: self.stat.in_lft_cnt,
+            in_rgt_cnt: self.stat.in_rgt_cnt,
+            sty_cnt: self.stat.sty_cnt,
             max: self.stat.max,
             avg: self.stat.avg,
             var: self.stat.var,    //Variance of occupancy
@@ -200,27 +269,106 @@ impl Bucket {
 
 
 fn main() {
+    let mut M = m { id: 5, lf: 5 };
+
+    //let mut block = blk { m: M, d: [5, 5] };
+
+    let mut Tcur: u32;
+    let mut x: u32;
+    let mut w: u32;
 
     unsafe {
-        //oram_exp();
-        //BG();
-        experimental_function();
+        Tcur = 0;
+        let mut rng = rand::thread_rng();
+        x = rng.gen_range(two.pow(L - 1)..(two.pow(L) - 1));
+        w = rng.gen_range(1..(two.pow(L - R) - 1));
+
+        AvailabilityTS(Tcur, x, w);
+
+        x = rng.gen_range(two.pow(L - 1)..(two.pow(L) - 1));
+        w = rng.gen_range(1..(two.pow(L - R) - 1));
+
+        //block.m = M;
+        //block.d = [5,5];
+
+        //tfhe_exp();
+
+        AvailabilityTS(Tcur, x, w);
+        oram_exp();
     }
 }
 
+unsafe fn AvailabilityTS(Tcur: u32, x: u32, w: u32) -> u32 {
+    let mut Texp: u32;
+    let mut t: u32 = 0;
+
+    let mut lw: u32 = ((w as f64).log2() as u32) + 1; //Automatic floor operation due to type conversion
+    let mut ax: u32 = (x >> (L - lw));
+    let mut aw: u32 = w; //Ancestor of w, start with w
+    let mut prev_aw: u32;
+
+    printdbgln!(0, "level of w({}) is: {}", w, lw);
+    printdbgln!(0, "Ancestor of x({}) is: {}", x, ax);
+
+    while (ax != aw) {
+        t = t + 2 * (N - 1) - aw - 1;
+
+        if ((aw % 2) == 0) {
+            t = t + 1;
+        }
+
+        prev_aw = aw;
+        ax = ax << 1;
+        aw = aw << 1;
+    }
+
+    Texp = 0;
+
+    return Texp;
+}
+
+/* Observation till date:
+- access count of bucket[1] is almost 2/3 of other buckets
+- Maximum occupancy of upper buckets are in single digit. Average is very less
+  - Maximum occupancy of the upper buckets decreases if the rate increases
+- Upper the buffer, average is more. Except the root.
+- Bucket[7] has extreamly low average (why?)
+- Lower layer buckets have irregular stats
+- Lower buckets are accessed less number of times, as expected
+- Bucket[15]'s stats are very low
+- There are lots of read failure events
+- Upper layer buckets goes through more movement and lower layers through less movement
+- Leaf buckets have average over 9, why this is happening?
+- The maximum of lower buffers are going beyond 26, how to control that?
+- For the same rate ratio, maximum value of upper layer buckets changes with N. If N increase, max value is also increasing
+- We can think each bucket as a queue, from S. Keshav's video, I learnt that for maintaining a stable situation the arrival rate must be less than
+  the departure rate. How to calculate the arrival and departure rates? I can see that the #arrival = #departure as expected
+- With the increase of N, write failure increases. N=2^15 failure 57311/50000000. N=2^10: 2960/50000000. N=2^4: 1/50000000.
+ */
 unsafe fn oram_exp() {
     /* Set experimentation parameters fist */
-    N = two.pow(3);
+    N = two.pow(20);//1GB database
     R = 1;
     Z = 6;//Number of slots in a bucket
     C = Z/2;
+    rate_ratio = 10;
+    max_burst_cnt = 10*1024;//Assume each block is of 1KB and each burst is of 10MB
+    min_relax_cnt = 5*60*1000;//Assume it is 5 minutes and 100 edges (i.e., 2Z*1000*1KB = 12MB/s) are processed each second
 
     /* Derived parameters */
     L = ((N as f64).log2() as u32) + 1;
     epoch = 2 * (N - 1);
 
     /* Local variable */
+    let mut edge: u32; /* Determines which edge to process now */
+    let ITR_CNT: u64 = 500000; /* The experiment will run until t reaches itr_cnt */
+    let mut node_que: VecDeque<u32> = VecDeque::new(); /* Queue of parent nodes */
+    let mut b: u32; /* Holds the label of the current bucket */
+    let mut p: usize; /* Holds the label of the parent node of the current edge */
+    let mut x: u32;
     let mut tree: Vec<Bucket> = Vec::with_capacity(2 * (N as usize) - 1);
+    let mut fetched_blk_cnt = 0;
+    let mut relax_cnt = 0;
 
     printdbgln!(
         1,
@@ -240,6 +388,119 @@ unsafe fn oram_exp() {
 
     /* Initialize the ORAM with dummy data */
     oram_init(&mut tree);
+
+    //Initialize the randomness
+    let mut rng_x = rand::thread_rng();
+    let mut rng_r = rand::thread_rng();
+    let mut rng_w = rand::thread_rng();
+    let mut randomness = rand::thread_rng();
+    let mut r_dist = Uniform::new_inclusive(two.pow(L - 1), (two.pow(L) - 1));
+    let mut x_dist = Uniform::new_inclusive(two.pow(L - 1), (two.pow(L) - 1));
+    let mut w_dist = Uniform::new_inclusive(1, (two.pow(L - 1) - 1));
+
+    node_que.push_front(tree[0].b); /* At first push the root bucket. Located in tree[0], but has label = 1 */
+    tu = 0; /* Initialize with time count 0 */
+    edge = 1; /* Initialize with edge count 1 */
+
+    /* Do the experiment until a specified time */
+    while tu < ITR_CNT {
+        if (fetched_blk_cnt < max_burst_cnt) {
+            if (tu % (rate_ratio as u64)) == 0 {
+                let mut read_success: bool;
+                /* Perform one read */
+                read_success = oram_read(&mut randomness, &mut r_dist, &mut tree);
+    
+                /* Perform one write */
+                if (read_success == true){
+                    oram_write(&mut randomness, &mut x_dist, &mut w_dist, &mut tree);
+                }
+            }
+            
+            fetched_blk_cnt += 1;
+        } else {
+            if (relax_cnt < min_relax_cnt) {
+                relax_cnt += 1;
+            } else {
+                fetched_blk_cnt = 0;
+                relax_cnt = 0;
+            }
+        }
+
+        /* During each step, two different edges are processed */
+        if let Some(p) = node_que.pop_back() {
+            node_que.push_front(2 * p); //Actually 2p bucket. -1 becasue of 0 index
+            node_que.push_front(2 * p + 1); //2p+1
+
+            bg_process(&mut tree, p, 2 * p);
+            tu += 1;
+
+            bg_process(&mut tree, p, 2 * p + 1);
+            tu += 1;
+        } else {
+            printdbgln!(0, "Queue is empty");
+        }
+
+        /* Re-initialize the queue */
+        if (tu % (epoch as u64)) == 0 {
+            node_que.clear();
+            node_que.push_front(tree[0].b);
+            //printdbgln!(0,  "Clearning queue");
+        }
+    }
+
+    oram_stat_print(&mut tree);
+
+    //experimental_function();
+}
+
+unsafe fn oram_write(
+    mut randomness: &mut ThreadRng,
+    mut x_dist: &mut Uniform<u32>,
+    mut w_dist: &mut Uniform<u32>,
+    tree: &mut Vec<Bucket>,
+) {
+    //Randomly select a new leaf node and write node
+    let x = randomness.sample(*x_dist);
+    let w = randomness.sample(*w_dist);
+
+    if (tree[w as usize - 1].blocks.len() < Z as usize) {
+        //Bucket with label w is stored in location (w-1)
+        //Write a block having leaf label x, into the bucket(w)
+        tree[w as usize - 1].insert(x);
+        tree[w as usize - 1].calc_stat(); //Update statistics
+    } else {
+        write_failure_cnt += 1;
+    }
+
+    tree[w as usize - 1].stat.w_cnt += 1;
+    tree[x as usize - 1].stat.x_cnt += 1;
+
+}
+
+unsafe fn oram_read(
+    mut randomness: &mut ThreadRng,
+    mut r_dist: &mut Uniform<u32>,
+    tree: &mut Vec<Bucket>,
+) -> bool {
+    let mut success: bool = true;
+
+    //For experiment, randomly select a leaf node to read
+    let r = randomness.sample(*r_dist);
+
+    //Bucket with label r is stored in location (r-1)
+    //For experimentation purpose always read the first item from the bucket
+    //So, only using the bare remove() method of list data-type
+    if (tree[r as usize - 1].blocks.len() > 0) {
+        tree[r as usize - 1].blocks.remove(0);
+        tree[r as usize - 1].calc_stat(); //Update statistics
+    } else {
+        read_failure_cnt += 1;//In real scenario, this will not happen unless the server misbehaves. Because, the client will not issue read in that case.
+        success = false;
+    }
+    tree[r as usize - 1].stat.r_cnt += 1;
+    //printdbgln!(1, "After reading, length of bucket[{}]:{}", r, tree[r as usize - 1].blocks.len());
+
+    return success;
 }
 
 unsafe fn oram_init(tree: &mut Vec<Bucket>) {
@@ -591,6 +852,90 @@ fn BG() {
     process_swap_Obliviously(&mut MU, &mut ML);
     move_U2L_Obliviously(&mut MU, &mut ML);
     move_L2U_Obliviously(&mut MU, &mut ML);
+}
+
+unsafe fn oram_stat_print(tree: &mut Vec<Bucket>) {
+    printdbgln!(1, "Bucket\t\ta_cnt\tr_cnt\tw_cnt\tx_cnt\tavg\tvar\tmax\tout_up\tout_lft\tout_rgt\tin_up\tin_lft\tin_rgt\tsty");
+
+    for b in 1..=(two.pow(L) - 1) {
+        tree[b as usize - 1].print_stat();
+    }
+
+    printdbgln!(1, "Read failure count: {}, write failure count: {}, background failure count: {}", read_failure_cnt, write_failure_cnt, bg_failure_cnt);
+}
+
+/* Inspired from the movement algorithm in sumit_draft.docx */
+unsafe fn bg_process(tree: &mut Vec<Bucket>, upper: u32, lower: u32) {
+    let mut l_upper: u32 = ((upper as f64).log2() as u32) + 1;
+    let mut l_lower: u32 = l_upper + 1;
+    let mut blk_num: u32;
+    let mut org_lower_buk_sz: usize;
+    let mut change_flag: bool = false;
+
+    /* First move down */
+    for i in (0..tree[upper as usize - 1].blocks.len()).rev() {
+        //Iterate in reverse order to avoid shifting of indices due to removal
+        /* First move down, but before that store the original size of the lower bucket */
+        org_lower_buk_sz = tree[lower as usize - 1].blocks.len();
+        if (lower == (tree[upper as usize - 1].blocks[i] >> (L - l_lower))) {
+            blk_num = tree[upper as usize - 1].blocks.remove(i); /* Remove the block from the upper bucket */
+            tree[lower as usize - 1].insert(blk_num); /* Insert at the end of the lower bucket */
+            change_flag = true;
+
+            if ((lower % 2) == 0 ){ //Even means, moving to the left child
+                tree[upper as usize - 1].stat.out_lft_cnt += 1;
+                tree[lower as usize - 1].stat.in_up_cnt += 1;
+            } else {
+                tree[upper as usize - 1].stat.out_rgt_cnt += 1;
+                tree[lower as usize - 1].stat.in_up_cnt += 1;
+            }
+        } else {
+            tree[upper as usize - 1].stat.sty_cnt += 1;
+        }
+    }
+
+    /* Do not count the failure, when moving to the leaf bucket.
+       Already there are some problems regarding the lower buckets, as it is going beyond 24.
+     */
+    if (tree[lower as usize - 1].blocks.len() > Z as usize) && (l_lower < L) {
+        bg_failure_cnt += 1;
+    }
+
+    /* Then move up, but before that store the original size of the lower bucket */
+    org_lower_buk_sz = tree[lower as usize - 1].blocks.len();
+
+    /* Only perform movement of the items which were originally present in the lower bucket */
+    for i in (0..org_lower_buk_sz).rev() {
+        //Iterate in reverse order to avoid shifting of indices due to removal
+        if (lower != (tree[lower as usize - 1].blocks[i] >> (L - l_lower))) {
+            blk_num = tree[lower as usize - 1].blocks.remove(i); /* Remove the block from the lower bucket */
+            tree[upper as usize - 1].insert(blk_num); /* Insert at the end of the upper bucket */
+            change_flag = true;
+            if ((lower % 2) == 0 ){ //Even means, moving to the left child
+                tree[upper as usize - 1].stat.in_lft_cnt += 1;
+                tree[lower as usize - 1].stat.out_up_cnt += 1;
+            }else{
+                tree[upper as usize - 1].stat.in_rgt_cnt += 1;
+                tree[lower as usize - 1].stat.out_up_cnt += 1;
+            }
+        } else {
+            tree[lower as usize - 1].stat.sty_cnt += 1;
+        }
+    }
+
+    if (tree[upper as usize - 1].blocks.len() > Z as usize) {
+        bg_failure_cnt += 1;
+    }
+
+    /* Calculate the stat, whenever the node is accessed. Irrespective of change or no change */
+    tree[upper as usize - 1].calc_stat();
+    tree[lower as usize - 1].calc_stat();
+
+    /* Print statistics, only if there is a change */
+    if change_flag {
+        //tree[upper as usize-1].print_stat();
+        //tree[lower as usize-1].print_stat();
+    }
 }
 
 unsafe fn experimental_function() {
