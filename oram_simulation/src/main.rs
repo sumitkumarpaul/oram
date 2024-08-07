@@ -39,11 +39,28 @@ macro_rules! NUMu64 {
     };
 }
 
+macro_rules! EMPTY {
+    () => {
+        2 
+    };
+}
+
+macro_rules! MOVE {
+    () => {
+        1 
+    };
+}
+
+macro_rules! NOT_MOVE {
+    () => {
+        0 
+    };
+}
 static mut N: u32 = 8;
 static mut L: u32 = 4;
 static mut R: u32 = 1;
 static mut C: u32 = 1; /* Initial number of replicas */
-static mut Z: u32 = 1;
+static mut Z: u32 = 6;
 static mut B: u32 = 4096; /* Common block size is: 4KB
                           But RLWE can encrypt 3KB per ciphertext.
                           So, block size must be set to multiple of 3KB.
@@ -124,7 +141,7 @@ impl blk {
 
 impl Bucket {
     // Method to create a new Bucket
-    fn new(label: u32) -> Self {
+    unsafe fn new(label: u32) -> Self {
         Bucket {
             b: label,
             stat: Stat {
@@ -144,17 +161,51 @@ impl Bucket {
                 var: 0.0,    //Variance of occupancy
                 sq_avg: 0.0, //Average of the square of the occupancy, required for calculating the variance
             },
-            blocks: Vec::new(),
+            blocks: vec![0; Z as usize],
         }
     }
 
-    // Method to add a u32 to the end of the list
-    fn insert(&mut self, value: u32) {
-        self.blocks.push(value);
+    // Method to add a u32(which contains the metadata m.x) in the place of 0
+    unsafe fn insert(&mut self, value: u32) -> bool {
+        let mut success:bool = false;
+
+        if self.occupancy() < Z as usize {
+            if let Some(pos) = self.blocks.iter().position(|&x| x == 0) {
+                self.blocks[pos] = value;
+                success = true;
+            }
+        }
+
+        return  success;
     }
 
+    // Number of non empty slots
+    fn occupancy(&mut self) -> usize {
+        let mut occuCnt: usize = 0;
+
+        unsafe {
+            for i in 0..Z {
+                if self.blocks[i as usize] != 0 {
+                    occuCnt += 1;
+                }
+            }   
+        }
+
+        return occuCnt;
+    }
+    
+    // Method to remove an item from the stated index and insert 0 in that place
+    fn remove(&mut self, index: usize) -> u32 {
+        let mut removed_item: u32 = 0;
+
+        removed_item = self.blocks[index];
+        self.blocks[index] = 0;
+
+        return removed_item;
+    }
+    
     // Method to remove an item by its value
-    fn remove(&mut self, value: u32) -> u32 {
+    fn removeVal(&mut self, value: u32) -> u32 {
         let mut removed_item: u32 = 0;
 
         if let Some(pos) = self.blocks.iter().position(|&x| x == value) {
@@ -164,7 +215,6 @@ impl Bucket {
 
         return removed_item;
     }
-
     // Method to update the statistics of the bucket
     fn calc_stat(&mut self) -> Stat {
         /* Store previous statistics */
@@ -178,7 +228,7 @@ impl Bucket {
 
         self.stat.access_cnt += 1;
 
-        let mut current: u32 = self.blocks.len() as u32;
+        let mut current: u32 = self.occupancy() as u32;
         total += current as u64;
         sq_total += current.pow(2) as u64;
 
@@ -290,7 +340,7 @@ fn main() {
         x = rng.gen_range(two.pow(L - 1)..(two.pow(L) - 1));
         w = rng.gen_range(1..(two.pow(L - R) - 1));
 
-        AvailabilityTS(Tcur, x, w);
+        //AvailabilityTS(Tcur, x, w);
 
         x = rng.gen_range(two.pow(L - 1)..(two.pow(L) - 1));
         w = rng.gen_range(1..(two.pow(L - R) - 1));
@@ -352,7 +402,6 @@ fn main() {
                                      Which turns out to be server processes: 2*6*4KB = 48KB/s */
         two.pow(29) as u64);/* Experiment runs for 2^29 steps.
                                              i.e., in this case more than server capacity number of blocks are accessed */
-        }
 
         /* Experiment 4 */
         oram_exp(two.pow(26), /* Kept block size 4KB as per other ORAM paper
@@ -366,8 +415,10 @@ fn main() {
         (two.pow(29) as u64 - (5*60*1)as u64) as u64, /* After fetching 10GB data, the client will not access anymore */
         two.pow(29) as u64);/* Experiment runs for 2^29 steps.
                                              i.e., in this case more than server capacity number of blocks are accessed */
-
+        }
+        experimental_function();
     }
+    
 }
 
 unsafe fn AvailabilityTS(Tcur: u32, x: u32, w: u32) -> u32 {
@@ -512,10 +563,14 @@ unsafe fn oram_exp(_N: u32, _Z: u32, _rate_ratio: u32, _max_burst_cnt: u64, _min
             node_que.push_front(2 * p); //Actually 2p bucket. -1 becasue of 0 index
             node_que.push_front(2 * p + 1); //2p+1
 
-            permute(&mut tree, p, 2 * p);
+            let (mut muUp, mut muDn) = calcMovement(&mut tree, p, 2 * p);
+
+            permute(&mut tree, p, 2 * p, &mut muUp, &mut muDn);
             tu += 1;
 
-            permute(&mut tree, p, 2 * p + 1);
+            (muUp, muDn) = calcMovement(&mut tree, p, 2 * p + 1);
+
+            permute(&mut tree, p, 2 * p + 1, &mut muUp, &mut muDn);
             tu += 1;
         } else {
             printdbgln!(0, "Queue is empty");
@@ -546,7 +601,7 @@ unsafe fn oram_insert(
     let x = randomness.sample(*x_dist);
     let w = randomness.sample(*w_dist);
 
-    if (tree[w as usize - 1].blocks.len() < Z as usize) {
+    if (tree[w as usize - 1].occupancy() < Z as usize) {
         //Bucket with label w is stored in location (w-1)
         //Write a block having leaf label x, into the bucket(w)
         tree[w as usize - 1].insert(x);
@@ -574,8 +629,8 @@ unsafe fn oram_remove(
     //Bucket with label r is stored in location (r-1)
     //For experimentation purpose always read the first item from the bucket
     //So, only using the bare remove() method of list data-type
-    if (tree[r as usize - 1].blocks.len() > 0) {
-        tree[r as usize - 1].blocks.remove(0);
+    if (tree[r as usize - 1].occupancy() > 0) {
+        tree[r as usize - 1].remove(0);
         tree[r as usize - 1].calc_stat(); //Update statistics
     } else {
         read_underflow_cnt += 1; //In real scenario, this will not happen unless the server misbehaves. Because, the client will not issue read in that case.
@@ -954,7 +1009,7 @@ unsafe fn oram_stat_print(tree: &mut Vec<Bucket>) {
 }
 
 /* Inspired from the movement algorithm in sumit_draft.docx not according to the paper */
-unsafe fn permute(tree: &mut Vec<Bucket>, upper: u32, lower: u32) {
+unsafe fn permute_Old(tree: &mut Vec<Bucket>, upper: u32, lower: u32) {
     let mut l_upper: u32 = ((upper as f64).log2() as u32) + 1;
     let mut l_lower: u32 = l_upper + 1;
     let mut blk_num: u32;
@@ -962,12 +1017,12 @@ unsafe fn permute(tree: &mut Vec<Bucket>, upper: u32, lower: u32) {
     let mut change_flag: bool = false;
 
     /* First move down */
-    for i in (0..tree[upper as usize - 1].blocks.len()).rev() {
+    for i in (0..tree[upper as usize - 1].occupancy()).rev() {
         //Iterate in reverse order to avoid shifting of indices due to removal
         /* First move down, but before that store the original size of the lower bucket */
-        org_lower_buk_sz = tree[lower as usize - 1].blocks.len();
+        org_lower_buk_sz = tree[lower as usize - 1].occupancy();
         if (lower == (tree[upper as usize - 1].blocks[i] >> (L - l_lower))) {
-            blk_num = tree[upper as usize - 1].blocks.remove(i); /* Remove the block from the upper bucket */
+            blk_num = tree[upper as usize - 1].remove(i); /* Remove the block from the upper bucket */
             tree[lower as usize - 1].insert(blk_num); /* Insert at the end of the lower bucket */
             change_flag = true;
 
@@ -994,18 +1049,18 @@ unsafe fn permute(tree: &mut Vec<Bucket>, upper: u32, lower: u32) {
       Already there are some problems regarding the lower buckets, as it is going beyond 24.
     */
     //if (tree[lower as usize - 1].blocks.len() > Z as usize) && (l_lower < L) {
-    if (tree[lower as usize - 1].blocks.len() > Z as usize) {
+    if (tree[lower as usize - 1].occupancy() > Z as usize) {
         routing_congestion_cnt += 1;
     }
 
     /* Then move up, but before that store the original size of the lower bucket */
-    org_lower_buk_sz = tree[lower as usize - 1].blocks.len();
+    org_lower_buk_sz = tree[lower as usize - 1].occupancy();
 
     /* Only perform movement of the items which were originally present in the lower bucket */
     for i in (0..org_lower_buk_sz).rev() {
         //Iterate in reverse order to avoid shifting of indices due to removal
         if (lower != (tree[lower as usize - 1].blocks[i] >> (L - l_lower))) {
-            blk_num = tree[lower as usize - 1].blocks.remove(i); /* Remove the block from the lower bucket */
+            blk_num = tree[lower as usize - 1].remove(i); /* Remove the block from the lower bucket */
             tree[upper as usize - 1].insert(blk_num); /* Insert at the end of the upper bucket */
             change_flag = true;
             if ((lower % 2) == 0) {
@@ -1021,7 +1076,7 @@ unsafe fn permute(tree: &mut Vec<Bucket>, upper: u32, lower: u32) {
         }
     }
 
-    if (tree[upper as usize - 1].blocks.len() > Z as usize) {
+    if (tree[upper as usize - 1].occupancy() > Z as usize) {
         routing_congestion_cnt += 1;
     }
 
@@ -1036,59 +1091,125 @@ unsafe fn permute(tree: &mut Vec<Bucket>, upper: u32, lower: u32) {
     }
 }
 
+unsafe fn calcMovement(tree: &mut Vec<Bucket>, upper: u32, lower: u32) -> (Vec<i32>, Vec<i32>) {
+    let mut l_upper: u32 = ((upper as f64).log2() as u32) + 1;
+    let mut l_lower: u32 = l_upper + 1;
+    let mut muUp = Vec::new();
+    let mut muDn = Vec::new();
+
+    /* First upper bucket */
+    for i in 0..Z {
+        if tree[upper as usize - 1].blocks[i as usize] == 0 {
+            muUp.push(EMPTY!());
+        } else {
+            if (lower == (tree[upper as usize - 1].blocks[i as usize] >> (L - l_lower))) {
+                muUp.push(MOVE!());
+            } else {
+                muUp.push(NOT_MOVE!());
+            }
+        }
+    }
+
+    /* Then check the lower bucket */
+    for i in 0..Z {
+        if tree[lower as usize - 1].blocks[i as usize] == 0 {
+            muDn.push(EMPTY!());
+        } else {
+            if (lower == (tree[lower as usize - 1].blocks[i as usize] >> (L - l_lower))) {
+                muDn.push(NOT_MOVE!());
+            } else {
+                muDn.push(MOVE!());
+            }
+        }
+    }
+
+    (muUp, muDn)
+}
+
+/* Inspired from the movement algorithm in sumit_draft.docx not according to the paper */
+unsafe fn permute(tree: &mut Vec<Bucket>, upper: u32, lower: u32, muUp: &mut Vec<i32>, muDn: &mut Vec<i32>) {
+    
+    if false {
+    /* First swap */
+    for i in 0..Z as usize {
+        for j in 0..Z as usize {
+            if (muUp[i] == MOVE!()) && (muDn[j] == MOVE!()) {
+                let tmp:u32 = tree[upper as usize - 1].blocks[i];
+                tree[upper as usize - 1].blocks[i] = tree[lower as usize - 1].blocks[j];
+                tree[lower as usize - 1].blocks[j] = tmp;
+                muUp[i] = NOT_MOVE!();
+                muDn[j] = NOT_MOVE!();
+            }
+        }    
+    }
+    
+    /* Move up */
+    for i in 0..Z as usize {
+        for j in 0..Z as usize {
+            if (muUp[j] == EMPTY!()) && (muDn[i] == MOVE!()) {
+                tree[upper as usize - 1].blocks[j] = tree[lower as usize - 1].blocks[i];
+                tree[lower as usize - 1].blocks[i] = 0;
+                muUp[j] = NOT_MOVE!();
+                muDn[i] = EMPTY!();
+            }
+        }    
+    }
+}
+
+    /* Move down */
+    for i in 0..Z as usize {
+        for j in 0..Z as usize {
+            if (muUp[i] == MOVE!()) && (muDn[j] == EMPTY!()) {
+                tree[lower as usize - 1].blocks[j] = tree[upper as usize - 1].blocks[i];
+                tree[upper as usize - 1].blocks[i] = 0;
+                muUp[i] = EMPTY!();
+                muDn[j] = NOT_MOVE!();
+            }
+        }    
+    }    
+}
+
+
 unsafe fn experimental_function() {
-    // Basic configuration to use homomorphic integers
-    let config = ConfigBuilder::default().build();
+    let mut tree: Vec<Bucket> = Vec::with_capacity(2 * (N as usize) - 1);
+    /* Loop from 1 to 2N - 1 */
+    for i in 1..=(2 * (N as usize) - 1) {
+        tree.push(Bucket::new(i as u32));
+    }
 
-    // Key generation
-    let (client_key, server_keys) = generate_keys(config);
+    /* Initialize the ORAM with dummy data */
+    oram_init(&mut tree);
 
-    let mut clear_a = 0x1;
-    let mut clear_b = 0x2;
+    let upper: u32 = 3;
+    let lower: u32 = 7;
 
-    //Create block A
-    let mut blkA = blk::new(0, 0);
-    blkA.fillData(FheUint1024::encrypt(0_u64, &client_key));
+    tree[upper as usize - 1].insert(11);
+    tree[upper as usize - 1].insert(13);
+    tree[upper as usize - 1].insert(15);
+    tree[upper as usize - 1].insert(14);
+    tree[upper as usize - 1].insert(9);
+    tree[upper as usize - 1].insert(12);
 
-    //Create block B
-    let mut blkB = blk::new(1, 0);
-    blkB.fillData(FheUint1024::encrypt(1_u64, &client_key));
+    tree[lower as usize - 1].insert(14);
+    tree[lower as usize - 1].insert(12);
+    tree[lower as usize - 1].insert(10);
+    tree[lower as usize - 1].insert(15);
 
-    // Encrypting the input data using the (private) client_key
-    // FheInt32: Encrypted equivalent to i32
-    let mut encrypted_a = FheInt32::encrypt(clear_a, &client_key);
-    let mut encrypted_b = FheInt32::encrypt(clear_b, &client_key);
-    let encBit = FheBool::encrypt(true, &client_key);
-    printdbgln!(1, "Line: {}", line!());
 
-    // On the server side:
-    set_server_key(server_keys);
-    printdbgln!(1, "Line: {}", line!());
+    let (mut muUp, mut muDn) = calcMovement(&mut tree, upper, lower);
+    
+    printdbgln!(1, "Bucket({}): {:?}", upper, tree[upper as usize - 1].blocks);
+    printdbgln!(1, "Bucket({}): {:?}", lower, tree[lower as usize - 1].blocks);
+    printdbgln!(1, "muUp: {:?}", muUp);
+    printdbgln!(1, "muDn: {:?}", muDn);
 
-    /*
-    let mut encrypted_tmp = encrypted_a.clone();
+    permute(&mut tree, upper, lower, &mut muUp, &mut muDn);
+    
+    printdbgln!(1, "Bucket({}): {:?}", upper, tree[upper as usize - 1].blocks);
+    printdbgln!(1, "Bucket({}): {:?}", lower, tree[lower as usize - 1].blocks);
+    printdbgln!(1, "muUp: {:?}", muUp);
+    printdbgln!(1, "muDn: {:?}", muDn);
 
-    encrypted_a = encBit.select(&encrypted_b, &encrypted_a);
-
-    encrypted_b = encBit.select(&encrypted_tmp, &encrypted_b);
-
-    let clear_a: i32 = encrypted_a.decrypt(&client_key);
-    let clear_b: i32 = encrypted_b.decrypt(&client_key);
-    */
-    cswap_blk(&encBit, &mut blkA, &mut blkB);
-    //cswap_blk(&encBit, &mut encrypted_a, &mut encrypted_b);
-
-    printdbgln!(1, "Line: {}", line!());
-
-    clear_a = encrypted_a.decrypt(&client_key);
-    clear_b = encrypted_b.decrypt(&client_key);
-
-    printdbgln!(
-        1,
-        "After swapping the values are: a={} and b={}",
-        clear_a,
-        clear_b
-    );
 }
 
 unsafe fn cswap_blk(encBit: &FheBool, blkA: &mut blk, blkB: &mut blk) {
