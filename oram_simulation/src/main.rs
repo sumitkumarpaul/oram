@@ -15,6 +15,9 @@ use std::collections::VecDeque;
 use std::mem::MaybeUninit;
 use tfhe::prelude::*;
 use tfhe::ClientKey;
+use std::fs::File;
+use std::io::Write;
+use std::io::Result;
 
 macro_rules! printdbgln {
     ($dlvl:expr, $($arg:tt)*) => {
@@ -270,23 +273,22 @@ impl Bucket {
 
     // Method printing the statistics of the bucket
     // The printing order is always: access_count, average, variance, maximum, current content
-    fn print_stat(&mut self) -> Stat {
-        printdbgln!(
-            1,
-            "Bucket[{}]:\t\
-    {}\t\
-    {}\t\
-    {}\t\
-    {}\t\
-    {:.2}\t\
-    {:.2}\t\
-    {}\t\
-    {}\t\
-    {}\t\
-    {}\t\
-    {}\t\
-    {}\t\
-    {}\t\
+    fn print_stat(&mut self, file: &mut File) -> Stat {
+    // Handle the Result returned by writeln! using match
+    if let Err(e) = writeln!(file, "Bucket[{}],\
+    {},\
+    {},\
+    {},\
+    {},\
+    {:.2},\
+    {:.2},\
+    {},\
+    {},\
+    {},\
+    {},\
+    {},\
+    {},\
+    {},\
     {}",
             self.b,
             self.stat.access_cnt,
@@ -302,9 +304,9 @@ impl Bucket {
             self.stat.in_up_cnt,
             self.stat.in_lft_cnt,
             self.stat.in_rgt_cnt,
-            self.stat.sty_cnt //self.blocks,
-        );
-
+            self.stat.sty_cnt) {
+        eprintln!("Failed to write to file: {}", e);
+    }
         Stat {
             access_cnt: self.stat.access_cnt,
             w_cnt: self.stat.w_cnt,
@@ -584,14 +586,13 @@ unsafe fn oram_exp(
             permute(&mut tree, p, 2 * p + 1, &mut muUp, &mut muDn);
             tu += 1;
         } else {
-            printdbgln!(0, "Queue is empty");
+            printdbgln!(1, "Queue is empty");
         }
 
         /* Re-initialize the queue */
         if (tu % (epoch as u64)) == 0 {
             node_que.clear();
             node_que.push_front(tree[0].b);
-            //printdbgln!(0,  "Clearning queue");
         }
     }
 
@@ -603,7 +604,6 @@ unsafe fn oram_exp(
         Local::now().format("%Y-%m-%d %H:%M:%S.%6f").to_string()
     );
 
-    //experimental_function();
 }
 
 unsafe fn oram_insert(
@@ -668,12 +668,27 @@ unsafe fn oram_init(tree: &mut Vec<Bucket>) {
 }
 
 unsafe fn oram_stat_print(tree: &mut Vec<Bucket>) {
-    printdbgln!(1, "Bucket\t\ta_cnt\tr_cnt\tw_cnt\tx_cnt\tavg\tvar\tmax\tout_up\tout_lft\tout_rgt\tin_up\tin_lft\tin_rgt\tsty");
+    let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
+    let filename = format!("detailed_log_{}.csv", timestamp);
 
-    /*
+    // Handle the Result returned by File::create using match
+    let mut file = match File::create(&filename) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("Failed to create file: {}", e);
+            return; // Exit the function if file creation fails
+        }
+    };
+
+    // Handle the Result returned by writeln! using match
+    if let Err(e) = writeln!(file, "Bucket,a_cnt,r_cnt,w_cnt,x_cnt,avg,var,max,out_up,out_lft,out_rgt,in_up,in_lft,in_rgt,sty") {
+        eprintln!("Failed to write to file: {}", e);
+        return; // Exit the function if writing fails
+    }
+
     for b in 1..=(two.pow(L) - 1) {
-        tree[b as usize - 1].print_stat();
-    }*/
+        tree[b as usize - 1].print_stat(&mut file);
+    }
 
     /* Note: We are not calculating read error. i.e., the block must be availabel at some leaf but is not.
      Basically, if the server is honest(but curious) then that value must be zero, if routing_congestion_cnt = 0
