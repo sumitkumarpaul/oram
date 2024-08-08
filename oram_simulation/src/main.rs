@@ -41,19 +41,19 @@ macro_rules! NUMu64 {
 
 macro_rules! EMPTY {
     () => {
-        2 
+        2
     };
 }
 
 macro_rules! MOVE {
     () => {
-        1 
+        1
     };
 }
 
 macro_rules! NOT_MOVE {
     () => {
-        0 
+        0
     };
 }
 static mut N: u32 = 8;
@@ -76,9 +76,9 @@ static mut routing_congestion_cnt: u64 = 0; /* The number of times the backgroun
 static mut max_burst_cnt: u64 = 0; /* The number of blocks the client retrives in a burst */
 static mut min_relax_cnt: u64 = 0; /* The amount of time (in terms of step processing), the client relaxes after each burst */
 static mut global_max_bucket_load: u32 = 0; /* Maximum load occurred in any bucket */
-static mut total_num_removed: u64 = 0;/* Total number of blocks removed from its leaf location */
-static mut total_num_placed: u64 = 0;/* How many number of blocks are returned to place by the routing process */
-static mut last_placement_tu: u64 = 0;/* When the last block is placed to its destined leaf */
+static mut total_num_removed: u64 = 0; /* Total number of blocks removed from its leaf location */
+static mut total_num_placed: u64 = 0; /* How many number of blocks are returned to place by the routing process */
+static mut last_placement_tu: u64 = 0; /* When the last block is placed to its destined leaf */
 
 struct m {
     id: u32,
@@ -167,7 +167,7 @@ impl Bucket {
 
     // Method to add a u32(which contains the metadata m.x) in the place of 0
     unsafe fn insert(&mut self, value: u32) -> bool {
-        let mut success:bool = false;
+        let mut success: bool = false;
 
         if self.occupancy() < Z as usize {
             if let Some(pos) = self.blocks.iter().position(|&x| x == 0) {
@@ -176,7 +176,7 @@ impl Bucket {
             }
         }
 
-        return  success;
+        return success;
     }
 
     // Number of non empty slots
@@ -188,12 +188,12 @@ impl Bucket {
                 if self.blocks[i as usize] != 0 {
                     occuCnt += 1;
                 }
-            }   
+            }
         }
 
         return occuCnt;
     }
-    
+
     // Method to remove an item from the stated index and insert 0 in that place
     fn remove(&mut self, index: usize) -> u32 {
         let mut removed_item: u32 = 0;
@@ -203,7 +203,7 @@ impl Bucket {
 
         return removed_item;
     }
-    
+
     // Method to remove an item by its value
     fn removeVal(&mut self, value: u32) -> u32 {
         let mut removed_item: u32 = 0;
@@ -351,74 +351,80 @@ fn main() {
         //tfhe_exp();
 
         //AvailabilityTS(Tcur, x, w);
-        
+
         //Comment out some experiments
         if false {
-        /* Experiment 1 */
-        oram_exp(two.pow(26), /* Kept block size 4KB as per other ORAM paper
-                                         256GB remote storage.
-                                         2^26*4KB blocks. With compute canada resource cannot simulate larger remote storage
-                                      */
-        6, /* Number of slots. Kept is same as PathORAM */
-        1, /* Client and server has same processing speed. Worst case scenario.
-                           in general, the server is much faster */
-        (1024*256), /* 1GB=1024*256 4KB blocks */
-        (60*60*1), /* Client will relax for 60 minutes. In the meantime, the server will keep routing.
-                                     Assumed, the server processes one edge per second.
-                                     i.e., 2Z blocks each having 4KB
-                                     Which turns out to be server processes: 2*6*4KB = 48KB/s */
-        two.pow(20) as u64);/* Experiment runs for 2^29 steps.
-                                             i.e., in this case more than server capacity number of blocks are accessed */
+            /* Experiment 1 */
+            oram_exp(
+                two.pow(26), /* Kept block size 4KB as per other ORAM paper
+                                256GB remote storage.
+                                2^26*4KB blocks. With compute canada resource cannot simulate larger remote storage
+                             */
+                6, /* Number of slots. Kept is same as PathORAM */
+                1, /* Client and server has same processing speed. Worst case scenario.
+                   in general, the server is much faster */
+                (1024 * 256), /* 1GB=1024*256 4KB blocks */
+                (60 * 60 * 1), /* Client will relax for 60 minutes. In the meantime, the server will keep routing.
+                               Assumed, the server processes one edge per second.
+                               i.e., 2Z blocks each having 4KB
+                               Which turns out to be server processes: 2*6*4KB = 48KB/s */
+                two.pow(20) as u64,
+            ); /* Experiment runs for 2^29 steps.
+               i.e., in this case more than server capacity number of blocks are accessed */
 
-        /* Experiment 2 */
-        oram_exp(two.pow(26), /* Kept block size 4KB as per other ORAM paper
-                                         256GB remote storage.
-                                         2^26*4KB blocks. With compute canada resource cannot simulate larger remote storage
-                                      */
-        6, /* Number of slots. Kept is same as PathORAM */
-        1, /* Client and server has same processing speed. Worst case scenario.
-                           in general, the server is much faster */
-        (12*256), /* 12MB=12*256 4KB blocks */
-        (5*60*1), /* Client will relax for 5 minutes. In the meantime, the server will keep routing.
-                                     Assumed, the server processes one edge per second.
-                                     i.e., 2Z blocks each having 4KB
-                                     Which turns out to be server processes: 2*6*4KB = 48KB/s */
-        two.pow(20) as u64);/* Experiment runs for 2^29 steps.
-                                             i.e., in this case more than server capacity number of blocks are accessed */
+            /* Experiment 2 */
+            oram_exp(
+                two.pow(26), /* Kept block size 4KB as per other ORAM paper
+                                256GB remote storage.
+                                2^26*4KB blocks. With compute canada resource cannot simulate larger remote storage
+                             */
+                6, /* Number of slots. Kept is same as PathORAM */
+                1, /* Client and server has same processing speed. Worst case scenario.
+                   in general, the server is much faster */
+                (12 * 256), /* 12MB=12*256 4KB blocks */
+                (5 * 60 * 1), /* Client will relax for 5 minutes. In the meantime, the server will keep routing.
+                              Assumed, the server processes one edge per second.
+                              i.e., 2Z blocks each having 4KB
+                              Which turns out to be server processes: 2*6*4KB = 48KB/s */
+                two.pow(20) as u64,
+            ); /* Experiment runs for 2^29 steps.
+               i.e., in this case more than server capacity number of blocks are accessed */
 
+            /* Experiment 3 */
+            oram_exp(
+                two.pow(26), /* Kept block size 4KB as per other ORAM paper
+                                256GB remote storage.
+                                2^26*4KB blocks. With compute canada resource cannot simulate larger remote storage
+                             */
+                6, /* Number of slots. Kept is same as PathORAM */
+                1, /* Client and server has same processing speed. Worst case scenario.
+                   in general, the server is much faster */
+                (12 * 256), /* 12MB=12*256 4KB blocks */
+                (5 * 60 * 1), /* Client will relax for 5 minutes. In the meantime, the server will keep routing.
+                              Assumed, the server processes one edge per second.
+                              i.e., 2Z blocks each having 4KB
+                              Which turns out to be server processes: 2*6*4KB = 48KB/s */
+                two.pow(29) as u64,
+            ); /* Experiment runs for 2^29 steps.
+               i.e., in this case more than server capacity number of blocks are accessed */
 
-        /* Experiment 3 */
-        oram_exp(two.pow(26), /* Kept block size 4KB as per other ORAM paper
-                                         256GB remote storage.
-                                         2^26*4KB blocks. With compute canada resource cannot simulate larger remote storage
-                                      */
-        6, /* Number of slots. Kept is same as PathORAM */
-        1, /* Client and server has same processing speed. Worst case scenario.
-                           in general, the server is much faster */
-        (12*256), /* 12MB=12*256 4KB blocks */
-        (5*60*1), /* Client will relax for 5 minutes. In the meantime, the server will keep routing.
-                                     Assumed, the server processes one edge per second.
-                                     i.e., 2Z blocks each having 4KB
-                                     Which turns out to be server processes: 2*6*4KB = 48KB/s */
-        two.pow(29) as u64);/* Experiment runs for 2^29 steps.
-                                             i.e., in this case more than server capacity number of blocks are accessed */
-
-        /* Experiment 4 */
-        oram_exp(two.pow(26), /* Kept block size 4KB as per other ORAM paper
-                                         256GB remote storage.
-                                         2^26*4KB blocks. With compute canada resource cannot simulate larger remote storage
-                                      */
-        6, /* Number of slots. Kept is same as PathORAM */
-        1, /* Client and server has same processing speed. Worst case scenario.
-                           in general, the server is much faster */
-        (10240*256), /* 10GB=10240*256 4KB blocks */
-        (two.pow(29) as u64 - (5*60*1)as u64) as u64, /* After fetching 10GB data, the client will not access anymore */
-        two.pow(29) as u64);/* Experiment runs for 2^29 steps.
-                                             i.e., in this case more than server capacity number of blocks are accessed */
+            /* Experiment 4 */
+            oram_exp(
+                two.pow(26), /* Kept block size 4KB as per other ORAM paper
+                                256GB remote storage.
+                                2^26*4KB blocks. With compute canada resource cannot simulate larger remote storage
+                             */
+                6, /* Number of slots. Kept is same as PathORAM */
+                1, /* Client and server has same processing speed. Worst case scenario.
+                   in general, the server is much faster */
+                (10240 * 256), /* 10GB=10240*256 4KB blocks */
+                (two.pow(29) as u64 - (5 * 60 * 1) as u64) as u64, /* After fetching 10GB data, the client will not access anymore */
+                two.pow(29) as u64,
+            ); /* Experiment runs for 2^29 steps.
+               i.e., in this case more than server capacity number of blocks are accessed */
         }
         experimental_function();
     }
-    
 }
 
 unsafe fn AvailabilityTS(Tcur: u32, x: u32, w: u32) -> u32 {
@@ -468,7 +474,14 @@ unsafe fn AvailabilityTS(Tcur: u32, x: u32, w: u32) -> u32 {
   the departure rate. How to calculate the arrival and departure rates? I can see that the #arrival = #departure as expected
 - With the increase of N, write failure increases. N=2^15 failure 57311/50000000. N=2^10: 2960/50000000. N=2^4: 1/50000000.
 */
-unsafe fn oram_exp(_N: u32, _Z: u32, _rate_ratio: u32, _max_burst_cnt: u64, _min_relax_cnt: u64, _ITR_CNT: u64) {
+unsafe fn oram_exp(
+    _N: u32,
+    _Z: u32,
+    _rate_ratio: u32,
+    _max_burst_cnt: u64,
+    _min_relax_cnt: u64,
+    _ITR_CNT: u64,
+) {
     /* Set experimentation parameters fist */
     N = _N;
     R = 1;
@@ -586,7 +599,11 @@ unsafe fn oram_exp(_N: u32, _Z: u32, _rate_ratio: u32, _max_burst_cnt: u64, _min
 
     oram_stat_print(&mut tree);
 
-    printdbgln!(1, "Experimentation ended at: {}", Local::now().format("%Y-%m-%d %H:%M:%S.%6f").to_string());
+    printdbgln!(
+        1,
+        "Experimentation ended at: {}",
+        Local::now().format("%Y-%m-%d %H:%M:%S.%6f").to_string()
+    );
 
     //experimental_function();
 }
@@ -1127,22 +1144,35 @@ unsafe fn calcMovement(tree: &mut Vec<Bucket>, upper: u32, lower: u32) -> (Vec<i
 }
 
 /* Inspired from the movement algorithm in sumit_draft.docx not according to the paper */
-unsafe fn permute(tree: &mut Vec<Bucket>, upper: u32, lower: u32, muUp: &mut Vec<i32>, muDn: &mut Vec<i32>) {
-    
-    if false {
+unsafe fn permute(
+    tree: &mut Vec<Bucket>,
+    upper: u32,
+    lower: u32,
+    muUp: &mut Vec<i32>,
+    muDn: &mut Vec<i32>,
+) {
+    let mut l_lower: u32 = ((lower as f64).log2() as u32) + 1;
+
     /* First swap */
     for i in 0..Z as usize {
         for j in 0..Z as usize {
             if (muUp[i] == MOVE!()) && (muDn[j] == MOVE!()) {
-                let tmp:u32 = tree[upper as usize - 1].blocks[i];
+                let tmp: u32 = tree[upper as usize - 1].blocks[i];
                 tree[upper as usize - 1].blocks[i] = tree[lower as usize - 1].blocks[j];
                 tree[lower as usize - 1].blocks[j] = tmp;
                 muUp[i] = NOT_MOVE!();
                 muDn[j] = NOT_MOVE!();
+
+                /* Means routing process is able to return back
+                   one block to its destined leaf bucket */
+                if (l_lower == L) {
+                    total_num_placed += 1;
+                    last_placement_tu = tu;
+                }                
             }
-        }    
+        }
     }
-    
+
     /* Move up */
     for i in 0..Z as usize {
         for j in 0..Z as usize {
@@ -1151,10 +1181,12 @@ unsafe fn permute(tree: &mut Vec<Bucket>, upper: u32, lower: u32, muUp: &mut Vec
                 tree[lower as usize - 1].blocks[i] = 0;
                 muUp[j] = NOT_MOVE!();
                 muDn[i] = EMPTY!();
+
+                /* No block can be moved to the leaf,
+                   during the upward movement */
             }
-        }    
+        }
     }
-}
 
     /* Move down */
     for i in 0..Z as usize {
@@ -1164,52 +1196,41 @@ unsafe fn permute(tree: &mut Vec<Bucket>, upper: u32, lower: u32, muUp: &mut Vec
                 tree[upper as usize - 1].blocks[i] = 0;
                 muUp[i] = EMPTY!();
                 muDn[j] = NOT_MOVE!();
+
+                /* Means routing process is able to return back
+                   one block to its destined leaf bucket */
+                   if (l_lower == L) {
+                    total_num_placed += 1;
+                    last_placement_tu = tu;
+                }                
             }
-        }    
-    }    
-}
-
-
-unsafe fn experimental_function() {
-    let mut tree: Vec<Bucket> = Vec::with_capacity(2 * (N as usize) - 1);
-    /* Loop from 1 to 2N - 1 */
-    for i in 1..=(2 * (N as usize) - 1) {
-        tree.push(Bucket::new(i as u32));
+        }
     }
 
-    /* Initialize the ORAM with dummy data */
-    oram_init(&mut tree);
+    /* Check congestion */
+    for i in 0..Z as usize {
+        /* Ideally there should not be any movable block in either bucket */
+        if (muUp[i] == MOVE!()) {
+            routing_congestion_cnt += 1;
+        }
+        if (muDn[i] == MOVE!()) {
+            routing_congestion_cnt += 1;
+        }
+    }
+}
 
-    let upper: u32 = 3;
-    let lower: u32 = 7;
+unsafe fn experimental_function() {
+    let mut total_sim_steps: u64 = two.pow(12) as u64;
+    let mut burst_cnt: u64 = 16;
 
-    tree[upper as usize - 1].insert(11);
-    tree[upper as usize - 1].insert(13);
-    tree[upper as usize - 1].insert(15);
-    tree[upper as usize - 1].insert(14);
-    tree[upper as usize - 1].insert(9);
-    tree[upper as usize - 1].insert(12);
-
-    tree[lower as usize - 1].insert(14);
-    tree[lower as usize - 1].insert(12);
-    tree[lower as usize - 1].insert(10);
-    tree[lower as usize - 1].insert(15);
-
-
-    let (mut muUp, mut muDn) = calcMovement(&mut tree, upper, lower);
-    
-    printdbgln!(1, "Bucket({}): {:?}", upper, tree[upper as usize - 1].blocks);
-    printdbgln!(1, "Bucket({}): {:?}", lower, tree[lower as usize - 1].blocks);
-    printdbgln!(1, "muUp: {:?}", muUp);
-    printdbgln!(1, "muDn: {:?}", muDn);
-
-    permute(&mut tree, upper, lower, &mut muUp, &mut muDn);
-    
-    printdbgln!(1, "Bucket({}): {:?}", upper, tree[upper as usize - 1].blocks);
-    printdbgln!(1, "Bucket({}): {:?}", lower, tree[lower as usize - 1].blocks);
-    printdbgln!(1, "muUp: {:?}", muUp);
-    printdbgln!(1, "muDn: {:?}", muDn);
-
+    oram_exp(
+        two.pow(6),
+        6,
+        1,
+        (burst_cnt), /* Only access few elements at the beginnig */
+        (total_sim_steps - burst_cnt),  /* Then perform nothing for rest of the time */
+              total_sim_steps,
+    );
 }
 
 unsafe fn cswap_blk(encBit: &FheBool, blkA: &mut blk, blkB: &mut blk) {
