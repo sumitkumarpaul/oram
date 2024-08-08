@@ -340,17 +340,11 @@ fn main() {
         x = rng.gen_range(two.pow(L - 1)..(two.pow(L) - 1));
         w = rng.gen_range(1..(two.pow(L - R) - 1));
 
-        //AvailabilityTS(Tcur, x, w);
-
         x = rng.gen_range(two.pow(L - 1)..(two.pow(L) - 1));
         w = rng.gen_range(1..(two.pow(L - R) - 1));
 
         //block.m = M;
         //block.d = [5,5];
-
-        //tfhe_exp();
-
-        //AvailabilityTS(Tcur, x, w);
 
         //Comment out some experiments
         if false {
@@ -427,6 +421,10 @@ fn main() {
     }
 }
 
+/* Implementation of this function not completed.
+   It must determine, the timestamp when the current block will be
+   available to the leaf bucket.
+ */
 unsafe fn AvailabilityTS(Tcur: u32, x: u32, w: u32) -> u32 {
     let mut Texp: u32;
     let mut t: u32 = 0;
@@ -639,13 +637,14 @@ unsafe fn oram_remove(
 ) -> bool {
     let mut success: bool = true;
 
-    //For experiment, randomly select a leaf node to read
+    //For experiment, randomly select a leaf node to remove.
+    //Ideally, this parameter must come as an input
     let r = randomness.sample(*r_dist);
     total_num_removed += 1;
 
     //Bucket with label r is stored in location (r-1)
     //For experimentation purpose always read the first item from the bucket
-    //So, only using the bare remove() method of list data-type
+    //Ideally, the client must only remove the requested block
     if (tree[r as usize - 1].occupancy() > 0) {
         tree[r as usize - 1].remove(0);
         tree[r as usize - 1].calc_stat(); //Update statistics
@@ -654,360 +653,18 @@ unsafe fn oram_remove(
         success = false;
     }
     tree[r as usize - 1].stat.r_cnt += 1;
-    //printdbgln!(1, "After reading, length of bucket[{}]:{}", r, tree[r as usize - 1].blocks.len());
 
     return success;
 }
 
 unsafe fn oram_init(tree: &mut Vec<Bucket>) {
-    //For experiment, randomly select a leaf node to read
-    for l in two.pow(L - 1)..=(two.pow(L) - 1) {
+    for x in two.pow(L - 1)..=(two.pow(L) - 1) {
         /* Insert C number of replicas, in each replica the same address is specified */
         for i in 0..C {
-            tree[l as usize - 1].insert(l);
+            tree[x as usize - 1].insert(x);
         }
-        tree[l as usize - 1].calc_stat();
+        tree[x as usize - 1].calc_stat();
     }
-}
-
-/*
-fn move_U2L(MU: &mut [i32], ML: &mut [i32]) {
-    let mut i = 0;
-    let mut j = 0;
-
-    printdbgln!(1, "======================");
-    printdbgln!(1, "Moving upper to lower:");
-    printdbgln!(1, "======================");
-
-    printdbg!(1, "MU array before operation: ");
-    for element in MU.iter() {
-        printdbg!(1, "{}, ", element);
-    }
-    printdbgln!(1, "");
-
-    printdbg!(1, "ML array before operation: ");
-    for element in ML.iter() {
-        printdbg!(1, "{}, ", element);
-    }
-    printdbgln!(1, "");
-
-    while (i < MU.len() && j < ML.len()) {
-        if MU[i] == 1 {
-            while ((j < ML.len()) && (ML[j] != 2)) {
-                j += 1;
-            }
-
-            if (j == ML.len()) {
-                break;
-            }
-            printdbgln!(1, "Moving down from MU[{}] to ML[{}]", i, j);
-
-            MU[i] = 0;
-            ML[j] = 0;
-            j += 1;
-        }
-
-        i += 1;
-    }
-
-    // Using a for loop to iterate through the array
-    printdbg!(1, "MU array after operation: ");
-    for element in MU.iter() {
-        printdbg!(1, "{}, ", element);
-    }
-    printdbgln!(1, "");
-
-    printdbg!(1, "ML array after operation: ");
-    for element in ML.iter() {
-        printdbg!(1, "{}, ", element);
-    }
-    printdbgln!(1, "");
-}
-*/
-
-fn move_U2L_Obliviously(MU: &mut [i32], ML: &mut [i32]) {
-    let mut i = 0;
-    let mut j = 0;
-
-    printdbgln!(1, "===================================");
-    printdbgln!(1, "Moving upper to lower obliviously: ");
-    printdbgln!(1, "===================================");
-
-    printdbg!(1, "MU array before operation: ");
-    for element in MU.iter() {
-        printdbg!(1, "{}, ", element);
-    }
-    printdbgln!(1, "");
-
-    printdbg!(1, "ML array before operation: ");
-    for element in ML.iter() {
-        printdbg!(1, "{}, ", element);
-    }
-    printdbgln!(1, "");
-
-    while i < MU.len() {
-        j = 0;
-        while j < ML.len() {
-            /* Upper block is required to move to lower layer and lower layer is empty */
-            if (MU[i] == 1) && (ML[j] == 2) {
-                printdbgln!(1, "Moving down from MU[{}] to ML[{}]", i, j);
-                /* After movement, the upper layer becomes empty and lower layer becomes staty */
-                MU[i] = 2;
-                ML[j] = 0;
-            } else {
-                /* Keep the elements same */
-                MU[i] = MU[i];
-                ML[j] = ML[j];
-            }
-            j += 1;
-        }
-
-        i += 1;
-    }
-
-    // Using a for loop to iterate through the array
-    printdbg!(1, "MU array after operation: ");
-    for element in MU.iter() {
-        printdbg!(1, "{}, ", element);
-    }
-    printdbgln!(1, "");
-
-    printdbg!(1, "ML array after operation: ");
-    for element in ML.iter() {
-        printdbg!(1, "{}, ", element);
-    }
-    printdbgln!(1, "");
-}
-
-fn move_L2U_Obliviously(MU: &mut [i32], ML: &mut [i32]) {
-    let mut i = 0;
-    let mut j = 0;
-
-    printdbgln!(1, "==================================");
-    printdbgln!(1, "Moving lower to upper obliviously:");
-    printdbgln!(1, "==================================");
-
-    printdbg!(1, "MU array before operation: ");
-    for element in MU.iter() {
-        printdbg!(1, "{}, ", element);
-    }
-    printdbgln!(1, "");
-
-    printdbg!(1, "ML array before operation: ");
-    for element in ML.iter() {
-        printdbg!(1, "{}, ", element);
-    }
-    printdbgln!(1, "");
-
-    while i < ML.len() {
-        j = 0;
-        while j < MU.len() {
-            /* Lower block is required to move to upper layer and upper layer is empty */
-            if (ML[i] == 1) && (MU[j] == 2) {
-                printdbgln!(1, "Moving down from ML[{}] to MU[{}]", i, j);
-                /* After movement, the lower layer becomes empty and upper layer becomes stay */
-                ML[i] = 2;
-                MU[j] = 0;
-            } else {
-                /* Keep the elements same */
-                ML[i] = ML[i];
-                MU[j] = MU[j];
-            }
-            j += 1;
-        }
-
-        i += 1;
-    }
-
-    // Using a for loop to iterate through the array
-    printdbg!(1, "MU array after operation: ");
-    for element in MU.iter() {
-        printdbg!(1, "{}, ", element);
-    }
-    printdbgln!(1, "");
-
-    printdbg!(1, "ML array after operation: ");
-    for element in ML.iter() {
-        printdbg!(1, "{}, ", element);
-    }
-    printdbgln!(1, "");
-}
-
-/*
-fn move_L2U(MU: &mut [i32], ML: &mut [i32]) {
-    let mut i = 0;
-    let mut j = 0;
-
-    printdbgln!(1, "======================");
-    printdbgln!(1, "Moving lower to upper:");
-    printdbgln!(1, "======================");
-
-
-    printdbg!(1, "MU array before operation: ");
-    for element in MU.iter() {
-        printdbg!(1, "{}, ", element);
-    }
-    printdbgln!(1, "");
-
-    printdbg!(1, "ML array before operation: ");
-    for element in ML.iter() {
-        printdbg!(1, "{}, ", element);
-    }
-    printdbgln!(1, "");
-
-    while (i < ML.len() && j < MU.len()) {
-        if ML[i] == 1 {
-            while ((j < MU.len()) && (MU[j] != 2)) {
-                j += 1;
-            }
-
-            if (j == MU.len()) {
-                break;
-            }
-            printdbgln!(1, "Moving up from ML[{}] to MU[{}]", i, j);
-
-            MU[j] = 0;
-            ML[i] = 0;
-
-            j += 1;
-        }
-
-        i += 1;
-    }
-
-    // Using a for loop to iterate through the array
-    printdbg!(1, "MU array after operation: ");
-    for element in MU.iter() {
-        printdbg!(1, "{}, ", element);
-    }
-    printdbgln!(1, "");
-
-    printdbg!(1, "ML array after operation: ");
-    for element in ML.iter() {
-        printdbg!(1, "{}, ", element);
-    }
-    printdbgln!(1, "");
-}
-*/
-
-fn process_swap(MU: &mut [i32], ML: &mut [i32]) {
-    let mut i = 0;
-    let mut j = 0;
-
-    printdbgln!(1, "====================");
-    printdbgln!(1, "Performing swapping:");
-    printdbgln!(1, "====================");
-
-    printdbg!(1, "MU array before operation: ");
-    for element in MU.iter() {
-        printdbg!(1, "{}, ", element);
-    }
-    printdbgln!(1, "");
-
-    printdbg!(1, "ML array before operation: ");
-    for element in ML.iter() {
-        printdbg!(1, "{}, ", element);
-    }
-    printdbgln!(1, "");
-
-    while (i < MU.len() && j < ML.len()) {
-        if MU[i] == 1 {
-            while ((j < ML.len()) && (ML[j] != 1)) {
-                j += 1;
-            }
-
-            if (j == ML.len()) {
-                break;
-            }
-            printdbgln!(1, "Swap between MU[{}] and ML[{}]", i, j);
-
-            MU[i] = 0;
-            ML[j] = 0;
-
-            j += 1;
-        }
-
-        i += 1;
-    }
-
-    // Using a for loop to iterate through the array
-    printdbg!(1, "MU array after operation: ");
-    for element in MU.iter() {
-        printdbg!(1, "{}, ", element);
-    }
-    printdbgln!(1, "");
-
-    printdbg!(1, "ML array after operation: ");
-    for element in ML.iter() {
-        printdbg!(1, "{}, ", element);
-    }
-    printdbgln!(1, "");
-}
-
-fn process_swap_Obliviously(MU: &mut [i32], ML: &mut [i32]) {
-    let mut i = 0;
-    let mut j = 0;
-
-    printdbgln!(1, "================================");
-    printdbgln!(1, "Performing swapping obliviously:");
-    printdbgln!(1, "================================");
-
-    printdbg!(1, "MU array before operation: ");
-    for element in MU.iter() {
-        printdbg!(1, "{}, ", element);
-    }
-    printdbgln!(1, "");
-
-    printdbg!(1, "ML array before operation: ");
-    for element in ML.iter() {
-        printdbg!(1, "{}, ", element);
-    }
-    printdbgln!(1, "");
-
-    while i < MU.len() {
-        j = 0;
-        while j < ML.len() {
-            /* Upper block is required to move to lower layer and lower layer is required to move upper layer */
-            if (MU[i] == 1) && (ML[j] == 1) {
-                printdbgln!(1, "Swapping between MU[{}] to ML[{}]", i, j);
-                /* After movement, both the upper and lower slots become stable */
-                MU[i] = 0;
-                ML[j] = 0;
-            } else {
-                /* Keep the elements same */
-                MU[i] = MU[i];
-                ML[j] = ML[j];
-            }
-            j += 1;
-        }
-
-        i += 1;
-    }
-
-    // Using a for loop to iterate through the array
-    printdbg!(1, "MU array after operation: ");
-    for element in MU.iter() {
-        printdbg!(1, "{}, ", element);
-    }
-    printdbgln!(1, "");
-
-    printdbg!(1, "ML array after operation: ");
-    for element in ML.iter() {
-        printdbg!(1, "{}, ", element);
-    }
-    printdbgln!(1, "");
-}
-
-fn BG() {
-    let mut MU = [1, 1, 1, 1, 1, 0, 0, 0, 0, 0]; // Movement of the upper bucket
-    let mut ML = [0, 0, 2, 2, 2, 0, 0, 1, 0, 0]; // Movement of the lower bucket
-
-    //let mut MU = [1,1,1,1,1,1,2,1,1,1]; // Movement of the upper bucket
-    //let mut ML = [1,1,1,2,1,1,1,1,0,1]; // Movement of the lower bucket
-
-    process_swap_Obliviously(&mut MU, &mut ML);
-    move_U2L_Obliviously(&mut MU, &mut ML);
-    move_L2U_Obliviously(&mut MU, &mut ML);
 }
 
 unsafe fn oram_stat_print(tree: &mut Vec<Bucket>) {
@@ -1023,89 +680,6 @@ unsafe fn oram_stat_print(tree: &mut Vec<Bucket>) {
     */
 
     printdbgln!(1, "Read underflow count: {}, write failure count: {}, routing congestion count: {}, global max load: {}, total number of removals: {}, total number of placements: {}, last placement occurred at: {}", read_underflow_cnt, write_failure_cnt, routing_congestion_cnt, global_max_bucket_load, total_num_removed, total_num_placed, last_placement_tu);
-}
-
-/* Inspired from the movement algorithm in sumit_draft.docx not according to the paper */
-unsafe fn permute_Old(tree: &mut Vec<Bucket>, upper: u32, lower: u32) {
-    let mut l_upper: u32 = ((upper as f64).log2() as u32) + 1;
-    let mut l_lower: u32 = l_upper + 1;
-    let mut blk_num: u32;
-    let mut org_lower_buk_sz: usize;
-    let mut change_flag: bool = false;
-
-    /* First move down */
-    for i in (0..tree[upper as usize - 1].occupancy()).rev() {
-        //Iterate in reverse order to avoid shifting of indices due to removal
-        /* First move down, but before that store the original size of the lower bucket */
-        org_lower_buk_sz = tree[lower as usize - 1].occupancy();
-        if (lower == (tree[upper as usize - 1].blocks[i] >> (L - l_lower))) {
-            blk_num = tree[upper as usize - 1].remove(i); /* Remove the block from the upper bucket */
-            tree[lower as usize - 1].insert(blk_num); /* Insert at the end of the lower bucket */
-            change_flag = true;
-
-            if ((lower % 2) == 0) {
-                //Even means, moving to the left child
-                tree[upper as usize - 1].stat.out_lft_cnt += 1;
-                tree[lower as usize - 1].stat.in_up_cnt += 1;
-            } else {
-                tree[upper as usize - 1].stat.out_rgt_cnt += 1;
-                tree[lower as usize - 1].stat.in_up_cnt += 1;
-            }
-
-            /* Means routing process is able to return back one block to its destined bucket */
-            if (l_lower == L) {
-                total_num_placed += 1;
-                last_placement_tu = tu;
-            }
-        } else {
-            tree[upper as usize - 1].stat.sty_cnt += 1;
-        }
-    }
-
-    /* Do not count the failure, when moving to the leaf bucket.
-      Already there are some problems regarding the lower buckets, as it is going beyond 24.
-    */
-    //if (tree[lower as usize - 1].blocks.len() > Z as usize) && (l_lower < L) {
-    if (tree[lower as usize - 1].occupancy() > Z as usize) {
-        routing_congestion_cnt += 1;
-    }
-
-    /* Then move up, but before that store the original size of the lower bucket */
-    org_lower_buk_sz = tree[lower as usize - 1].occupancy();
-
-    /* Only perform movement of the items which were originally present in the lower bucket */
-    for i in (0..org_lower_buk_sz).rev() {
-        //Iterate in reverse order to avoid shifting of indices due to removal
-        if (lower != (tree[lower as usize - 1].blocks[i] >> (L - l_lower))) {
-            blk_num = tree[lower as usize - 1].remove(i); /* Remove the block from the lower bucket */
-            tree[upper as usize - 1].insert(blk_num); /* Insert at the end of the upper bucket */
-            change_flag = true;
-            if ((lower % 2) == 0) {
-                //Even means, moving to the left child
-                tree[upper as usize - 1].stat.in_lft_cnt += 1;
-                tree[lower as usize - 1].stat.out_up_cnt += 1;
-            } else {
-                tree[upper as usize - 1].stat.in_rgt_cnt += 1;
-                tree[lower as usize - 1].stat.out_up_cnt += 1;
-            }
-        } else {
-            tree[lower as usize - 1].stat.sty_cnt += 1;
-        }
-    }
-
-    if (tree[upper as usize - 1].occupancy() > Z as usize) {
-        routing_congestion_cnt += 1;
-    }
-
-    /* Calculate the stat, whenever the node is accessed. Irrespective of change or no change */
-    tree[upper as usize - 1].calc_stat();
-    tree[lower as usize - 1].calc_stat();
-
-    /* Print statistics, only if there is a change */
-    if change_flag {
-        //tree[upper as usize-1].print_stat();
-        //tree[lower as usize-1].print_stat();
-    }
 }
 
 unsafe fn calcMovement(tree: &mut Vec<Bucket>, upper: u32, lower: u32) -> (Vec<i32>, Vec<i32>) {
@@ -1231,14 +805,4 @@ unsafe fn experimental_function() {
         (total_sim_steps - burst_cnt),  /* Then perform nothing for rest of the time */
               total_sim_steps,
     );
-}
-
-unsafe fn cswap_blk(encBit: &FheBool, blkA: &mut blk, blkB: &mut blk) {
-    //let mut encTmp = blkA.clone();
-
-    for i in 0..NUMu64!() {
-        blkA.d[i] = encBit.select(&blkB.d[i], &blkA.d[i]);
-        //*blkB = encBit.select(&encTmp, &blkB);
-        //*blkB = encBit.select(&encTmp, &blkB);
-    }
 }
