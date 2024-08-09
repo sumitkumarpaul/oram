@@ -7,3 +7,4 @@ edition = "2021"
 chrono = "0.4"
 tfhe = { version = "0.7.2", features = [ "boolean", "shortint", "integer", "x86_64-unix" ] }
 rand = "0.8.4"
+once_cell = "1.12"

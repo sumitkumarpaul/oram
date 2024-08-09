@@ -18,6 +18,11 @@ use tfhe::ClientKey;
 use std::fs::File;
 use std::io::Write;
 use std::io::Result;
+use once_cell::sync::Lazy;
+use std::sync::Mutex;
+
+// Define a global mutable list (vector) wrapped in a Mutex for thread safety
+static g_congested_buckets: Lazy<Mutex<Vec<u32>>> = Lazy::new(|| Mutex::new(vec![]));
 
 macro_rules! printdbgln {
     ($dlvl:expr, $($arg:tt)*) => {
@@ -693,8 +698,10 @@ unsafe fn oram_stat_print(tree: &mut Vec<Bucket>) {
     /* Note: We are not calculating read error. i.e., the block must be availabel at some leaf but is not.
      Basically, if the server is honest(but curious) then that value must be zero, if routing_congestion_cnt = 0
     */
+    let mut congested_buckets = g_congested_buckets.lock().unwrap();
 
     printdbgln!(1, "Read underflow count: {}, write failure count: {}, routing congestion count: {}, global max load: {}, total number of removals: {}, total number of placements: {}, last placement occurred at: {}", read_underflow_cnt, write_failure_cnt, routing_congestion_cnt, global_max_bucket_load, total_num_removed, total_num_placed, last_placement_tu);
+    printdbgln!(1, "The congested buckets are: {:?}", congested_buckets);
 }
 
 unsafe fn calcMovement(tree: &mut Vec<Bucket>, upper: u32, lower: u32) -> (Vec<i32>, Vec<i32>) {
@@ -798,12 +805,25 @@ unsafe fn permute(
 
     /* Check congestion */
     for i in 0..Z as usize {
+        let mut congested_buckets = g_congested_buckets.lock().unwrap();
         /* Ideally there should not be any movable block in either bucket */
         if (muUp[i] == MOVE!()) {
             routing_congestion_cnt += 1;
+
+            /* 
+             Still some blocks in the upper bucket remains unmoved
+               Means, the lower bucket is full and congested
+             */
+            congested_buckets.push(lower);
         }
         if (muDn[i] == MOVE!()) {
             routing_congestion_cnt += 1;
+
+            /* 
+             Still some blocks in the lower bucket remains unmoved
+               Means, the upper bucket is full and congested
+             */
+            congested_buckets.push(upper);            
         }
     }
 }
