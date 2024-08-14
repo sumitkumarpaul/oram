@@ -7,22 +7,24 @@ use tfhe::{
 };
 extern crate chrono;
 use chrono::Local;
+use once_cell::sync::Lazy;
 use rand::distributions::{Distribution, Uniform};
 use rand::rngs::ThreadRng;
 use rand::Rng;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::fs::File;
+use std::io::Result;
+use std::io::Write;
 use std::mem::MaybeUninit;
+use std::sync::Mutex;
+use std::thread;
 use tfhe::prelude::*;
 use tfhe::ClientKey;
-use std::fs::File;
-use std::io::Write;
-use std::io::Result;
-use once_cell::sync::Lazy;
-use std::sync::Mutex;
 
 // Define a global mutable list (vector) wrapped in a Mutex for thread safety
 static g_congested_buckets: Lazy<Mutex<Vec<u32>>> = Lazy::new(|| Mutex::new(vec![]));
+static g_tree: Lazy<Mutex<Vec<Bucket>>> = Lazy::new(|| Mutex::new(vec![]));
 
 macro_rules! printdbgln {
     ($dlvl:expr, $($arg:tt)*) => {
@@ -74,6 +76,7 @@ static mut B: u32 = 4096; /* Common block size is: 4KB
                           So, block size must be set to multiple of 3KB.
                           Moreover, some place must be kept reserved for storing metadata */
 static mut epoch: u32 = 14; //2(N-1)
+static mut ITR_CNT: u64 = 1024; /* The experiment will run for this amount of time */
 static mut rate_ratio: u32 = 10; //Ratio of server's processing : Client's processing
 static mut two: u32 = 2;
 static mut idx: usize = 0;
@@ -91,7 +94,7 @@ static mut last_placement_tu: u64 = 0; /* When the last block is placed to its d
 
 #[derive(Debug)]
 struct m {
-    id: u32,
+    a: u32,
     x: u32,
 }
 #[derive(Debug)]
@@ -130,7 +133,7 @@ impl Clone for blk {
     fn clone(&self) -> blk {
         blk {
             m: m {
-                id: self.m.id,
+                a: self.m.a,
                 x: self.m.x,
             },
             d: self.d,
@@ -142,19 +145,19 @@ impl blk {
     // Method to create a new Bucket
     fn new(id: u32, lf: u32) -> Self {
         blk {
-            m: m { id: 0, x: 0 },
+            m: m { a: 0, x: 0 },
             //d: Vec::new(),
             d: 0 as u32,
         }
     }
 
     fn mk_empty(&mut self) {
-        self.m.id = 0;
+        self.m.a = 0;
         self.m.x = 0;
     }
 
-    fn copy_to(&self, dstblk: &mut blk){
-        dstblk.m.id = self.m.id;
+    fn copy_to(&self, dstblk: &mut blk) {
+        dstblk.m.a = self.m.a;
         dstblk.m.x = self.m.x;
     }
 
@@ -202,15 +205,15 @@ impl Bucket {
     }
 
     // Method to add a u32(which contains the metadata m.x) in the place of 0
-    unsafe fn insert(&mut self, value: u32) -> bool {
+    unsafe fn insert(&mut self, x: u32, a: u32, d: u32) -> bool {
         let mut success: bool = false;
 
         if self.occupancy() < Z as usize {
             for slot in 0..Z as usize {
                 if self.blocks[slot].m.x == 0 {
-                    self.blocks[slot].m.x = value;
-                    //self.blocks[slot].m.id = value;
-                    //self.blocks[slot].d = value;
+                    self.blocks[slot].m.x = x;
+                    //self.blocks[slot].m.a = a;
+                    //self.blocks[slot].d = d;
                     success = true;
                     break;
                 }
@@ -234,7 +237,7 @@ impl Bucket {
 
         return occuCnt;
     }
-    
+
     // Method to remove an item from non-empty slot of the bucket
     unsafe fn removeNxt(&mut self) -> u32 {
         let mut removed_item: u32 = 0;
@@ -243,7 +246,7 @@ impl Bucket {
             if self.blocks[slot].m.x != 0 {
                 removed_item = self.blocks[slot].d;
                 self.blocks[slot].m.x = 0;
-                break;    
+                break;
             }
         }
 
@@ -327,9 +330,11 @@ impl Bucket {
 
     // Method printing the statistics of the bucket
     // The printing order is always: access_count, average, variance, maximum, current content
-    fn print_stat(&mut self, file: &mut File) -> Stat {
-    // Handle the Result returned by writeln! using match
-    if let Err(e) = writeln!(file, "Bucket[{}],\
+    fn print_detailed_stat(&mut self, file: &mut File) -> Stat {
+        // Handle the Result returned by writeln! using match
+        if let Err(e) = writeln!(
+            file,
+            "Bucket[{}],\
     {},\
     {},\
     {},\
@@ -360,9 +365,10 @@ impl Bucket {
             self.stat.in_up_cnt,
             self.stat.in_lft_cnt,
             self.stat.in_rgt_cnt,
-            self.stat.sty_cnt) {
-        eprintln!("Failed to write to file: {}", e);
-    }
+            self.stat.sty_cnt
+        ) {
+            eprintln!("Failed to write to file: {}", e);
+        }
         Stat {
             access_cnt: self.stat.access_cnt,
             w_cnt: self.stat.w_cnt,
@@ -384,7 +390,7 @@ impl Bucket {
 }
 
 fn main() {
-    let mut M = m { id: 5, x: 5 };
+    let mut M = m { a: 5, x: 5 };
 
     //let mut block = blk { m: M, d: [5, 5] };
 
@@ -480,9 +486,9 @@ fn main() {
 }
 
 /* Implementation of this function not completed.
-   It must determine, the timestamp when the current block will be
-   available to the leaf bucket.
- */
+  It must determine, the timestamp when the current block will be
+  available to the leaf bucket.
+*/
 unsafe fn AvailabilityTS(Tcur: u32, x: u32, w: u32) -> u32 {
     let mut Texp: u32;
     let mut t: u32 = 0;
@@ -552,14 +558,15 @@ unsafe fn oram_exp(
     epoch = 2 * (N - 1);
 
     /* Local variable */
-    let ITR_CNT: u64 = _ITR_CNT; /* The experiment will run until t reaches itr_cnt */
+    ITR_CNT = _ITR_CNT; /* The experiment will run until t reaches itr_cnt */
     let mut node_que: VecDeque<u32> = VecDeque::new(); /* Queue of parent nodes */
-    let mut b: u32; /* Holds the label of the current bucket */
-    let mut p: usize; /* Holds the label of the parent node of the current edge */
-    let mut x: u32;
-    let mut tree: Vec<Bucket> = Vec::with_capacity(2 * (N as usize) - 1);
-    let mut fetched_blk_cnt = 0;
+    let mut cur_burst_cnt = 0;
     let mut relax_cnt = 0;
+    //Initialize the randomness
+    let mut randomness = rand::thread_rng();
+    let mut r_dist = Uniform::new_inclusive(two.pow(L - 1), (two.pow(L) - 1));
+    let mut x_dist = Uniform::new_inclusive(two.pow(L - 1), (two.pow(L) - 1));
+    let mut w_dist = Uniform::new_inclusive(1, (two.pow(L - 1) - 1));
 
     printdbgln!(
         1,
@@ -573,101 +580,127 @@ unsafe fn oram_exp(
         ITR_CNT
     );
 
-    /* Loop from 1 to 2N - 1 */
-    for i in 1..=(2 * (N as usize) - 1) {
-        tree.push(Bucket::new(i as u32));
-    }
+    {
+        let mut tree = g_tree.lock().unwrap();
+        /* Loop from 1 to 2N - 1 */
+        for i in 1..=(2 * (N as usize) - 1) {
+            tree.push(Bucket::new(i as u32));
+        }
 
-    /* Initialize the ORAM with dummy data */
-    oram_init(&mut tree);
+        /* Initialize the ORAM with dummy data */
+        simulate_oram_init(&mut tree);
+    } /* Mutex automatically unlocked here */
 
-    //Initialize the randomness
-    let mut rng_x = rand::thread_rng();
-    let mut rng_r = rand::thread_rng();
-    let mut rng_w = rand::thread_rng();
-    let mut randomness = rand::thread_rng();
-    let mut r_dist = Uniform::new_inclusive(two.pow(L - 1), (two.pow(L) - 1));
-    let mut x_dist = Uniform::new_inclusive(two.pow(L - 1), (two.pow(L) - 1));
-    let mut w_dist = Uniform::new_inclusive(1, (two.pow(L - 1) - 1));
-
-    node_que.push_front(tree[0].b); /* At first push the root bucket. Located in tree[0], but has label = 1 */
+    node_que.push_front(1); /* At first push the root bucket. Located in tree[0], but has label = 1 */
     tu = 0; /* Initialize with time count 0 */
+
+    // Spawn a new thread to run `route()`
+    let handle = thread::spawn(|| {
+        route();
+    });
 
     /* Do the experiment until a specified time */
     while tu < ITR_CNT {
-        if (fetched_blk_cnt < max_burst_cnt) {
-            //As each iteration, two edges are processed to make the rate same, two blocks are accessed as well
+        if (cur_burst_cnt < max_burst_cnt) {
+            simulate_oram_access(&mut randomness, &mut r_dist, &mut w_dist, &mut x_dist);
 
-            //if (tu % (rate_ratio as u64)) == 0 {
-            let mut read_success: bool;
-            /* Perform one read */
-            read_success = oram_remove(&mut randomness, &mut r_dist, &mut tree);
-
-            /* Perform one write */
-            if (read_success == true) {
-                oram_insert(&mut randomness, &mut x_dist, &mut w_dist, &mut tree);
-            }
-
-            /* Perform second read */
-            read_success = oram_remove(&mut randomness, &mut r_dist, &mut tree);
-
-            /* Perform second write */
-            if (read_success == true) {
-                oram_insert(&mut randomness, &mut x_dist, &mut w_dist, &mut tree);
-            }
-            //}
-
-            fetched_blk_cnt += 1;
+            cur_burst_cnt += 1;
         } else {
             if (relax_cnt < min_relax_cnt) {
                 relax_cnt += 1;
             } else {
-                fetched_blk_cnt = 0;
+                cur_burst_cnt = 0;
                 relax_cnt = 0;
             }
         }
-
-        /* During each step, two different edges are processed */
-        if let Some(p) = node_que.pop_back() {
-            node_que.push_front(2 * p); //Actually 2p bucket. -1 becasue of 0 index
-            node_que.push_front(2 * p + 1); //2p+1
-
-            let (mut muUp, mut muDn) = calcMovement(&mut tree, p, 2 * p);
-
-            permute(&mut tree, p, 2 * p, &mut muUp, &mut muDn);
-            tu += 1;
-
-            (muUp, muDn) = calcMovement(&mut tree, p, 2 * p + 1);
-
-            permute(&mut tree, p, 2 * p + 1, &mut muUp, &mut muDn);
-            tu += 1;
-        } else {
-            printdbgln!(1, "Queue is empty");
-        }
-
-        /* Re-initialize the queue */
-        if (tu % (epoch as u64)) == 0 {
-            node_que.clear();
-            node_que.push_front(tree[0].b);
-        }
     }
 
-    oram_stat_print(&mut tree);
+    // Wait for the spawned thread to finish
+    handle.join().unwrap();
+
+    oram_print_stat(false);
 
     printdbgln!(
         1,
         "Experimentation ended at: {}",
         Local::now().format("%Y-%m-%d %H:%M:%S.%6f").to_string()
     );
-
 }
 
-unsafe fn oram_insert(
+unsafe fn route() {
+    let mut node_que: VecDeque<u32> = VecDeque::new(); /* Queue of parent nodes */
+    let mut process_left_edge: bool = true;
+    let mut lower: u32;
+    node_que.push_front(1); /* At first push the root bucket. Located in tree[0], but has label = 1 */
+
+    /* Run the thread until the specified time */
+    while tu < ITR_CNT {
+        /* TODO: Run it according to the rate ratio */
+        {
+            let mut tree = g_tree.lock().unwrap();
+            /* During each step, two different edges are processed */
+            if let Some(upper) = node_que.pop_back() {
+                if process_left_edge {
+                    lower = 2 * upper;
+                    node_que.push_back(upper); /* As left edge is being processed, it will again come as upper node */
+                } else {
+                    lower = 2 * upper + 1;
+                }
+
+                let (mut muUp, mut muDn) = calcMovement(&mut tree, upper, lower);
+
+                permute(&mut tree, upper, lower, &mut muUp, &mut muDn);
+                tu += 1;
+
+                node_que.push_front(lower);
+            } else {
+                printdbgln!(1, "Queue is empty, should not come here..!!");
+            }
+
+            /* Re-initialize the queue */
+            if (tu % (epoch as u64)) == 0 {
+                //epoch is global variable
+                node_que.clear();
+                node_que.push_front(1);
+            }
+
+            /* 
+               If current iteration processes left edge,
+               then the next iteration will process the right edge and vice-versa.
+             */
+            process_left_edge = !process_left_edge;
+
+        } /* Mutex automatically unlocked here */
+    }
+}
+
+unsafe fn simulate_oram_access(
+    mut randomness: &mut ThreadRng,
+    mut r_dist: &mut Uniform<u32>,
+    mut w_dist: &mut Uniform<u32>,
+    mut x_dist: &mut Uniform<u32>,
+) -> bool {
+    let mut success: bool = false;
+    let mut tree = g_tree.lock().unwrap();
+
+    /* Perform one read */
+    success = simulate_oram_remove(&mut tree, &mut randomness, &mut r_dist);
+
+    /* Perform one write */
+    if (success == true) {
+        success = simulate_oram_insert(&mut tree, &mut randomness, &mut x_dist, &mut w_dist);
+    }
+
+    return success;
+}
+
+unsafe fn simulate_oram_insert(
+    tree: &mut Vec<Bucket>,
     mut randomness: &mut ThreadRng,
     mut x_dist: &mut Uniform<u32>,
     mut w_dist: &mut Uniform<u32>,
-    tree: &mut Vec<Bucket>,
-) {
+) -> bool {
+    let mut success: bool = false;
     //Randomly select a new leaf node and write node
     let x = randomness.sample(*x_dist);
     let w = randomness.sample(*w_dist);
@@ -675,20 +708,23 @@ unsafe fn oram_insert(
     if (tree[w as usize - 1].occupancy() < Z as usize) {
         //Bucket with label w is stored in location (w-1)
         //Write a block having leaf label x, into the bucket(w)
-        tree[w as usize - 1].insert(x);
+        tree[w as usize - 1].insert(x, 0, 0); //Last two parameters are dummy now
         tree[w as usize - 1].calc_stat(); //Update statistics
         tree[w as usize - 1].stat.w_cnt += 1;
         tree[x as usize - 1].stat.x_cnt += 1;
+        success = true;
     } else {
         /* Cannot write to the block, as it is already full */
         write_failure_cnt += 1;
     }
+
+    return success;
 }
 
-unsafe fn oram_remove(
+unsafe fn simulate_oram_remove(
+    tree: &mut Vec<Bucket>,
     mut randomness: &mut ThreadRng,
     mut r_dist: &mut Uniform<u32>,
-    tree: &mut Vec<Bucket>,
 ) -> bool {
     let mut success: bool = true;
 
@@ -712,46 +748,48 @@ unsafe fn oram_remove(
     return success;
 }
 
-unsafe fn oram_init(tree: &mut Vec<Bucket>) {
+unsafe fn simulate_oram_init(tree: &mut Vec<Bucket>) {
     for x in two.pow(L - 1)..=(two.pow(L) - 1) {
         /* Insert C number of replicas, in each replica the same address is specified */
         for i in 0..C {
-            tree[x as usize - 1].insert(x);
+            tree[x as usize - 1].insert(x, 0, 0); /* Last two parameters are dummy now */
         }
         tree[x as usize - 1].calc_stat();
     }
 }
 
-unsafe fn oram_stat_print(tree: &mut Vec<Bucket>) {
+unsafe fn oram_print_stat(print_detailed: bool) {
     let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
     let filename = format!("detailed_log_{}.csv", timestamp);
+    let mut tree = g_tree.lock().unwrap();
 
-    // Handle the Result returned by File::create using match
-    let mut file = match File::create(&filename) {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("Failed to create file: {}", e);
-            return; // Exit the function if file creation fails
+    if print_detailed {
+        // Handle the Result returned by File::create using match
+        let mut file = match File::create(&filename) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("Failed to create file: {}", e);
+                return; // Exit the function if file creation fails
+            }
+        };
+
+        // Handle the Result returned by writeln! using match
+        if let Err(e) = writeln!(file, "Bucket,a_cnt,r_cnt,w_cnt,x_cnt,cur_occupancy,avg,var,max,out_up,out_lft,out_rgt,in_up,in_lft,in_rgt,sty") {
+            eprintln!("Failed to write to file: {}", e);
+            return; // Exit the function if writing fails
         }
-    };
 
-    // Handle the Result returned by writeln! using match
-    if let Err(e) = writeln!(file, "Bucket,a_cnt,r_cnt,w_cnt,x_cnt,cur_occupancy,avg,var,max,out_up,out_lft,out_rgt,in_up,in_lft,in_rgt,sty") {
-        eprintln!("Failed to write to file: {}", e);
-        return; // Exit the function if writing fails
+        for b in 1..=(two.pow(L) - 1) {
+            tree[b as usize - 1].print_detailed_stat(&mut file);
+        }
+
+        /* Note: We are not calculating read error. i.e., the block must be availabel at some leaf but is not.
+         Basically, if the server is honest(but curious) then that value must be zero, if routing_congestion_cnt = 0
+        */
+        let mut congested_buckets = g_congested_buckets.lock().unwrap();
     }
-
-    for b in 1..=(two.pow(L) - 1) {
-        tree[b as usize - 1].print_stat(&mut file);
-    }
-
-    /* Note: We are not calculating read error. i.e., the block must be availabel at some leaf but is not.
-     Basically, if the server is honest(but curious) then that value must be zero, if routing_congestion_cnt = 0
-    */
-    let mut congested_buckets = g_congested_buckets.lock().unwrap();
 
     printdbgln!(1, "Read underflow count: {}, write failure count: {}, routing congestion count: {}, global max load: {}, total number of removals: {}, total number of placements: {}, last placement occurred at: {}", read_underflow_cnt, write_failure_cnt, routing_congestion_cnt, global_max_bucket_load, total_num_removed, total_num_placed, last_placement_tu);
-    //printdbgln!(1, "The congested buckets are: {:?}", congested_buckets);
 }
 
 unsafe fn calcMovement(tree: &mut Vec<Bucket>, upper: u32, lower: u32) -> (Vec<i32>, Vec<i32>) {
@@ -800,6 +838,8 @@ unsafe fn permute(
     let mut l_lower: u32 = ((lower as f64).log2() as u32) + 1;
     let mut congestion: bool = false;
 
+    //printdbgln!(1, "Routing: {}<->{}", upper, lower);
+
     /* First swap */
     for i in 0..Z as usize {
         for j in 0..Z as usize {
@@ -811,23 +851,23 @@ unsafe fn permute(
                 muDn[j] = NOT_MOVE!();
 
                 /* Track movements of the lower bucket */
-                tree[lower as usize - 1].stat.in_up_cnt += 1;//One block came from upper bucket and one went to upper
-                tree[lower as usize - 1].stat.out_up_cnt += 1;//One block went to the upper bucket
+                tree[lower as usize - 1].stat.in_up_cnt += 1; //One block came from upper bucket and one went to upper
+                tree[lower as usize - 1].stat.out_up_cnt += 1; //One block went to the upper bucket
 
                 /* Track movements of the upper bucket */
                 if lower % 2 == 0 {
                     /* Lower bucket is a left child */
-                    tree[upper as usize - 1].stat.in_lft_cnt += 1;//One block came from left child
-                    tree[upper as usize - 1].stat.out_lft_cnt += 1;//One block went to the left child
+                    tree[upper as usize - 1].stat.in_lft_cnt += 1; //One block came from left child
+                    tree[upper as usize - 1].stat.out_lft_cnt += 1; //One block went to the left child
                 } else {
-                    tree[upper as usize - 1].stat.in_rgt_cnt += 1;//One block came from right child
-                    tree[upper as usize - 1].stat.out_rgt_cnt += 1;//One block went to the right child
+                    tree[upper as usize - 1].stat.in_rgt_cnt += 1; //One block came from right child
+                    tree[upper as usize - 1].stat.out_rgt_cnt += 1; //One block went to the right child
                 }
                 /*
                  Swapping cannot happen for leaf nodes,
                  because no block should go up from a leaf node
                  so, placement count is not required to update here
-                */                
+                */
             }
         }
     }
@@ -840,19 +880,19 @@ unsafe fn permute(
                 tree[lower as usize - 1].blocks[i].m.x = 0;
                 muUp[j] = NOT_MOVE!();
                 muDn[i] = EMPTY!();
-                
+
                 /* Track movements of the lower bucket */
-                tree[lower as usize - 1].stat.out_up_cnt += 1;//One block went to the upper bucket
+                tree[lower as usize - 1].stat.out_up_cnt += 1; //One block went to the upper bucket
 
                 /* Track movements of the upper bucket */
                 if lower % 2 == 0 {
                     /* Lower bucket is a left child */
-                    tree[upper as usize - 1].stat.in_lft_cnt += 1;//One block came from left child
+                    tree[upper as usize - 1].stat.in_lft_cnt += 1; //One block came from left child
                 } else {
-                    tree[upper as usize - 1].stat.in_rgt_cnt += 1;//One block came from right child
+                    tree[upper as usize - 1].stat.in_rgt_cnt += 1; //One block came from right child
                 }
                 /* No block can be moved to the leaf,
-                   during the upward movement */
+                during the upward movement */
             }
         }
     }
@@ -867,22 +907,22 @@ unsafe fn permute(
                 muDn[j] = NOT_MOVE!();
 
                 /* Track movements of the lower bucket */
-                tree[lower as usize - 1].stat.in_up_cnt += 1;//One block came from the upper bucket
+                tree[lower as usize - 1].stat.in_up_cnt += 1; //One block came from the upper bucket
 
                 /* Track movements of the upper bucket */
                 if lower % 2 == 0 {
                     /* Lower bucket is a left child */
-                    tree[upper as usize - 1].stat.out_lft_cnt += 1;//One block went to the left child
+                    tree[upper as usize - 1].stat.out_lft_cnt += 1; //One block went to the left child
                 } else {
-                    tree[upper as usize - 1].stat.out_rgt_cnt += 1;//One block went to the right child
-                }                
+                    tree[upper as usize - 1].stat.out_rgt_cnt += 1; //One block went to the right child
+                }
 
                 /* Means routing process is able to return back
-                   one block to its destined leaf bucket */
-                   if (tree[lower as usize - 1].blocks[j].m.x == lower) {
+                one block to its destined leaf bucket */
+                if (tree[lower as usize - 1].blocks[j].m.x == lower) {
                     total_num_placed += 1;
                     last_placement_tu = tu;
-                }                
+                }
             }
         }
     }
@@ -898,20 +938,20 @@ unsafe fn permute(
         if (muUp[i] == MOVE!()) {
             num_congestion_blocks += 1;
 
-            /* 
-             Still some blocks in the upper bucket remains unmoved
-               Means, the lower bucket is full and congested
-             */
+            /*
+            Still some blocks in the upper bucket remains unmoved
+              Means, the lower bucket is full and congested
+            */
             congested_buckets.push(lower);
             congestion = true;
         }
         if (muDn[i] == MOVE!()) {
             num_congestion_blocks += 1;
 
-            /* 
-             Still some blocks in the lower bucket remains unmoved
-               Means, the upper bucket is full and congested
-             */
+            /*
+            Still some blocks in the lower bucket remains unmoved
+              Means, the upper bucket is full and congested
+            */
             congested_buckets.push(upper);
             congestion = true;
         }
@@ -924,14 +964,14 @@ unsafe fn permute(
 
 unsafe fn experimental_function() {
     let mut total_sim_steps: u64 = two.pow(22) as u64;
-    let mut burst_cnt: u64 = 16;
+    let mut burst_cnt: u64 = 128;
 
     oram_exp(
         two.pow(6),
         6,
         1,
         (burst_cnt), /* Only access few elements at the beginnig */
-        (2048),  /* Then perform nothing for rest of the time */
-              total_sim_steps,
+        (1024),      /* Then perform nothing for rest of the time */
+        total_sim_steps,
     );
 }

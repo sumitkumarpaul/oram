@@ -10,5 +10,5 @@ cargo new oram_simulation
 ```
 Go to the "oram_simulation" directory, which contains the Cargo.toml
 ```
-cargo run --release
+RUSTFLAGS=-Awarnings cargo run --release
 ```
