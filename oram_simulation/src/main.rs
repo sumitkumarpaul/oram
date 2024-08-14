@@ -81,6 +81,7 @@ static mut tu: u64 = 0; /* Count of time unit */
 static mut read_underflow_cnt: u64 = 0; /* The number of times the read operation failed */
 static mut write_failure_cnt: u64 = 0; /* The number of times the write operation failed */
 static mut routing_congestion_cnt: u64 = 0; /* The number of times the background operation caused buffer overflow */
+static mut num_congestion_blocks: u64 = 0; /* The number of blocks affected due to congestion */
 static mut max_burst_cnt: u64 = 0; /* The number of blocks the client retrives in a burst */
 static mut min_relax_cnt: u64 = 0; /* The amount of time (in terms of step processing), the client relaxes after each burst */
 static mut global_max_bucket_load: u32 = 0; /* Maximum load occurred in any bucket */
@@ -88,19 +89,21 @@ static mut total_num_removed: u64 = 0; /* Total number of blocks removed from it
 static mut total_num_placed: u64 = 0; /* How many number of blocks are returned to place by the routing process */
 static mut last_placement_tu: u64 = 0; /* When the last block is placed to its destined leaf */
 
+#[derive(Debug)]
 struct m {
     id: u32,
-    lf: u32,
+    x: u32,
 }
+#[derive(Debug)]
 struct blk {
     m: m,
-    d: Vec<FheUint<FheUint1024Id>>,
+    //d: Vec<FheUint<FheUint1024Id>>,
+    d: u32,
 }
 
-#[derive(Debug)]
 struct Bucket {
     b: u32,           //The label of this bucket
-    blocks: Vec<u32>, //List holding the leaf identifiers of the blocks
+    blocks: Vec<blk>, //List holding the leaf identifiers of the blocks
     stat: Stat,
 }
 
@@ -123,16 +126,40 @@ struct Stat {
     sq_avg: f64, //Average of the square of the occupancy, required for calculating the variance
 }
 
+impl Clone for blk {
+    fn clone(&self) -> blk {
+        blk {
+            m: m {
+                id: self.m.id,
+                x: self.m.x,
+            },
+            d: self.d,
+        }
+    }
+}
+
 impl blk {
     // Method to create a new Bucket
     fn new(id: u32, lf: u32) -> Self {
         blk {
-            m: m { id: 0, lf: 0 },
-            d: Vec::new(),
+            m: m { id: 0, x: 0 },
+            //d: Vec::new(),
+            d: 0 as u32,
         }
     }
 
+    fn mk_empty(&mut self) {
+        self.m.id = 0;
+        self.m.x = 0;
+    }
+
+    fn copy_to(&self, dstblk: &mut blk){
+        dstblk.m.id = self.m.id;
+        dstblk.m.x = self.m.x;
+    }
+
     /* Fill all NUMu64! with same data */
+    /*/
     fn fillData(&mut self, d: FheUint1024) {
         for _ in 0..NUMu64!() {
             self.d.push(d.clone());
@@ -145,6 +172,7 @@ impl blk {
             //self.d.push(d.clone());
         }
     }
+    */
 }
 
 impl Bucket {
@@ -169,7 +197,7 @@ impl Bucket {
                 var: 0.0,    //Variance of occupancy
                 sq_avg: 0.0, //Average of the square of the occupancy, required for calculating the variance
             },
-            blocks: vec![0; Z as usize],
+            blocks: vec![blk::new(0, 0); Z as usize],
         }
     }
 
@@ -178,9 +206,14 @@ impl Bucket {
         let mut success: bool = false;
 
         if self.occupancy() < Z as usize {
-            if let Some(pos) = self.blocks.iter().position(|&x| x == 0) {
-                self.blocks[pos] = value;
-                success = true;
+            for slot in 0..Z as usize {
+                if self.blocks[slot].m.x == 0 {
+                    self.blocks[slot].m.x = value;
+                    //self.blocks[slot].m.id = value;
+                    //self.blocks[slot].d = value;
+                    success = true;
+                    break;
+                }
             }
         }
 
@@ -188,12 +221,12 @@ impl Bucket {
     }
 
     // Number of non empty slots
-    fn occupancy(&mut self) -> usize {
+    fn occupancy(&self) -> usize {
         let mut occuCnt: usize = 0;
 
         unsafe {
             for i in 0..Z {
-                if self.blocks[i as usize] != 0 {
+                if self.blocks[i as usize].m.x != 0 {
                     occuCnt += 1;
                 }
             }
@@ -201,18 +234,32 @@ impl Bucket {
 
         return occuCnt;
     }
+    
+    // Method to remove an item from non-empty slot of the bucket
+    unsafe fn removeNxt(&mut self) -> u32 {
+        let mut removed_item: u32 = 0;
+
+        for slot in 0..Z as usize {
+            if self.blocks[slot].m.x != 0 {
+                removed_item = self.blocks[slot].d;
+                self.blocks[slot].m.x = 0;
+                break;    
+            }
+        }
+
+        return removed_item;
+    }
 
     // Method to remove an item from the stated index and insert 0 in that place
     fn remove(&mut self, index: usize) -> u32 {
-        let mut removed_item: u32 = 0;
-
-        removed_item = self.blocks[index];
-        self.blocks[index] = 0;
+        let mut removed_item: u32 = self.blocks[index].d;
+        self.blocks[index].m.x = 0;
 
         return removed_item;
     }
 
     // Method to remove an item by its value
+    /*
     fn removeVal(&mut self, value: u32) -> u32 {
         let mut removed_item: u32 = 0;
 
@@ -223,6 +270,8 @@ impl Bucket {
 
         return removed_item;
     }
+    */
+
     // Method to update the statistics of the bucket
     fn calc_stat(&mut self) -> Stat {
         /* Store previous statistics */
@@ -285,6 +334,7 @@ impl Bucket {
     {},\
     {},\
     {},\
+    {},\
     {:.2},\
     {:.2},\
     {},\
@@ -300,6 +350,7 @@ impl Bucket {
             self.stat.r_cnt,
             self.stat.w_cnt,
             self.stat.x_cnt,
+            self.occupancy(),
             self.stat.avg,
             self.stat.var,
             self.stat.max,
@@ -333,7 +384,7 @@ impl Bucket {
 }
 
 fn main() {
-    let mut M = m { id: 5, lf: 5 };
+    let mut M = m { id: 5, x: 5 };
 
     //let mut block = blk { m: M, d: [5, 5] };
 
@@ -626,13 +677,12 @@ unsafe fn oram_insert(
         //Write a block having leaf label x, into the bucket(w)
         tree[w as usize - 1].insert(x);
         tree[w as usize - 1].calc_stat(); //Update statistics
+        tree[w as usize - 1].stat.w_cnt += 1;
+        tree[x as usize - 1].stat.x_cnt += 1;
     } else {
         /* Cannot write to the block, as it is already full */
         write_failure_cnt += 1;
     }
-
-    tree[w as usize - 1].stat.w_cnt += 1;
-    tree[x as usize - 1].stat.x_cnt += 1;
 }
 
 unsafe fn oram_remove(
@@ -645,19 +695,19 @@ unsafe fn oram_remove(
     //For experiment, randomly select a leaf node to remove.
     //Ideally, this parameter must come as an input
     let r = randomness.sample(*r_dist);
-    total_num_removed += 1;
 
     //Bucket with label r is stored in location (r-1)
     //For experimentation purpose always read the first item from the bucket
     //Ideally, the client must only remove the requested block
     if (tree[r as usize - 1].occupancy() > 0) {
-        tree[r as usize - 1].remove(0);
+        tree[r as usize - 1].removeNxt();
         tree[r as usize - 1].calc_stat(); //Update statistics
+        tree[r as usize - 1].stat.r_cnt += 1;
+        total_num_removed += 1;
     } else {
         read_underflow_cnt += 1; //In real scenario, this will not happen unless the server misbehaves. Because, the client will not issue read in that case.
         success = false;
     }
-    tree[r as usize - 1].stat.r_cnt += 1;
 
     return success;
 }
@@ -686,7 +736,7 @@ unsafe fn oram_stat_print(tree: &mut Vec<Bucket>) {
     };
 
     // Handle the Result returned by writeln! using match
-    if let Err(e) = writeln!(file, "Bucket,a_cnt,r_cnt,w_cnt,x_cnt,avg,var,max,out_up,out_lft,out_rgt,in_up,in_lft,in_rgt,sty") {
+    if let Err(e) = writeln!(file, "Bucket,a_cnt,r_cnt,w_cnt,x_cnt,cur_occupancy,avg,var,max,out_up,out_lft,out_rgt,in_up,in_lft,in_rgt,sty") {
         eprintln!("Failed to write to file: {}", e);
         return; // Exit the function if writing fails
     }
@@ -701,7 +751,7 @@ unsafe fn oram_stat_print(tree: &mut Vec<Bucket>) {
     let mut congested_buckets = g_congested_buckets.lock().unwrap();
 
     printdbgln!(1, "Read underflow count: {}, write failure count: {}, routing congestion count: {}, global max load: {}, total number of removals: {}, total number of placements: {}, last placement occurred at: {}", read_underflow_cnt, write_failure_cnt, routing_congestion_cnt, global_max_bucket_load, total_num_removed, total_num_placed, last_placement_tu);
-    printdbgln!(1, "The congested buckets are: {:?}", congested_buckets);
+    //printdbgln!(1, "The congested buckets are: {:?}", congested_buckets);
 }
 
 unsafe fn calcMovement(tree: &mut Vec<Bucket>, upper: u32, lower: u32) -> (Vec<i32>, Vec<i32>) {
@@ -712,10 +762,10 @@ unsafe fn calcMovement(tree: &mut Vec<Bucket>, upper: u32, lower: u32) -> (Vec<i
 
     /* First upper bucket */
     for i in 0..Z {
-        if tree[upper as usize - 1].blocks[i as usize] == 0 {
+        if tree[upper as usize - 1].blocks[i as usize].m.x == 0 {
             muUp.push(EMPTY!());
         } else {
-            if (lower == (tree[upper as usize - 1].blocks[i as usize] >> (L - l_lower))) {
+            if (lower == (tree[upper as usize - 1].blocks[i as usize].m.x >> (L - l_lower))) {
                 muUp.push(MOVE!());
             } else {
                 muUp.push(NOT_MOVE!());
@@ -725,10 +775,10 @@ unsafe fn calcMovement(tree: &mut Vec<Bucket>, upper: u32, lower: u32) -> (Vec<i
 
     /* Then check the lower bucket */
     for i in 0..Z {
-        if tree[lower as usize - 1].blocks[i as usize] == 0 {
+        if tree[lower as usize - 1].blocks[i as usize].m.x == 0 {
             muDn.push(EMPTY!());
         } else {
-            if (lower == (tree[lower as usize - 1].blocks[i as usize] >> (L - l_lower))) {
+            if (lower == (tree[lower as usize - 1].blocks[i as usize].m.x >> (L - l_lower))) {
                 muDn.push(NOT_MOVE!());
             } else {
                 muDn.push(MOVE!());
@@ -748,23 +798,36 @@ unsafe fn permute(
     muDn: &mut Vec<i32>,
 ) {
     let mut l_lower: u32 = ((lower as f64).log2() as u32) + 1;
+    let mut congestion: bool = false;
 
     /* First swap */
     for i in 0..Z as usize {
         for j in 0..Z as usize {
             if (muUp[i] == MOVE!()) && (muDn[j] == MOVE!()) {
-                let tmp: u32 = tree[upper as usize - 1].blocks[i];
-                tree[upper as usize - 1].blocks[i] = tree[lower as usize - 1].blocks[j];
+                let tmp: blk = tree[upper as usize - 1].blocks[i].clone();
+                tree[upper as usize - 1].blocks[i].m.x = tree[lower as usize - 1].blocks[j].m.x;
                 tree[lower as usize - 1].blocks[j] = tmp;
                 muUp[i] = NOT_MOVE!();
                 muDn[j] = NOT_MOVE!();
 
-                /* Means routing process is able to return back
-                   one block to its destined leaf bucket */
-                if (l_lower == L) {
-                    total_num_placed += 1;
-                    last_placement_tu = tu;
-                }                
+                /* Track movements of the lower bucket */
+                tree[lower as usize - 1].stat.in_up_cnt += 1;//One block came from upper bucket and one went to upper
+                tree[lower as usize - 1].stat.out_up_cnt += 1;//One block went to the upper bucket
+
+                /* Track movements of the upper bucket */
+                if lower % 2 == 0 {
+                    /* Lower bucket is a left child */
+                    tree[upper as usize - 1].stat.in_lft_cnt += 1;//One block came from left child
+                    tree[upper as usize - 1].stat.out_lft_cnt += 1;//One block went to the left child
+                } else {
+                    tree[upper as usize - 1].stat.in_rgt_cnt += 1;//One block came from right child
+                    tree[upper as usize - 1].stat.out_rgt_cnt += 1;//One block went to the right child
+                }
+                /*
+                 Swapping cannot happen for leaf nodes,
+                 because no block should go up from a leaf node
+                 so, placement count is not required to update here
+                */                
             }
         }
     }
@@ -773,11 +836,21 @@ unsafe fn permute(
     for i in 0..Z as usize {
         for j in 0..Z as usize {
             if (muUp[j] == EMPTY!()) && (muDn[i] == MOVE!()) {
-                tree[upper as usize - 1].blocks[j] = tree[lower as usize - 1].blocks[i];
-                tree[lower as usize - 1].blocks[i] = 0;
+                tree[upper as usize - 1].blocks[j].m.x = tree[lower as usize - 1].blocks[i].m.x;
+                tree[lower as usize - 1].blocks[i].m.x = 0;
                 muUp[j] = NOT_MOVE!();
                 muDn[i] = EMPTY!();
+                
+                /* Track movements of the lower bucket */
+                tree[lower as usize - 1].stat.out_up_cnt += 1;//One block went to the upper bucket
 
+                /* Track movements of the upper bucket */
+                if lower % 2 == 0 {
+                    /* Lower bucket is a left child */
+                    tree[upper as usize - 1].stat.in_lft_cnt += 1;//One block came from left child
+                } else {
+                    tree[upper as usize - 1].stat.in_rgt_cnt += 1;//One block came from right child
+                }
                 /* No block can be moved to the leaf,
                    during the upward movement */
             }
@@ -788,14 +861,25 @@ unsafe fn permute(
     for i in 0..Z as usize {
         for j in 0..Z as usize {
             if (muUp[i] == MOVE!()) && (muDn[j] == EMPTY!()) {
-                tree[lower as usize - 1].blocks[j] = tree[upper as usize - 1].blocks[i];
-                tree[upper as usize - 1].blocks[i] = 0;
+                tree[lower as usize - 1].blocks[j].m.x = tree[upper as usize - 1].blocks[i].m.x;
+                tree[upper as usize - 1].blocks[i].m.x = 0;
                 muUp[i] = EMPTY!();
                 muDn[j] = NOT_MOVE!();
 
+                /* Track movements of the lower bucket */
+                tree[lower as usize - 1].stat.in_up_cnt += 1;//One block came from the upper bucket
+
+                /* Track movements of the upper bucket */
+                if lower % 2 == 0 {
+                    /* Lower bucket is a left child */
+                    tree[upper as usize - 1].stat.out_lft_cnt += 1;//One block went to the left child
+                } else {
+                    tree[upper as usize - 1].stat.out_rgt_cnt += 1;//One block went to the right child
+                }                
+
                 /* Means routing process is able to return back
                    one block to its destined leaf bucket */
-                   if (l_lower == L) {
+                   if (tree[lower as usize - 1].blocks[j].m.x == lower) {
                     total_num_placed += 1;
                     last_placement_tu = tu;
                 }                
@@ -803,33 +887,43 @@ unsafe fn permute(
         }
     }
 
-    /* Check congestion */
+    /* Update block statistics */
+    tree[lower as usize - 1].calc_stat();
+    tree[upper as usize - 1].calc_stat();
+
+    /* After performing permutation, check congestion */
     for i in 0..Z as usize {
         let mut congested_buckets = g_congested_buckets.lock().unwrap();
         /* Ideally there should not be any movable block in either bucket */
         if (muUp[i] == MOVE!()) {
-            routing_congestion_cnt += 1;
+            num_congestion_blocks += 1;
 
             /* 
              Still some blocks in the upper bucket remains unmoved
                Means, the lower bucket is full and congested
              */
             congested_buckets.push(lower);
+            congestion = true;
         }
         if (muDn[i] == MOVE!()) {
-            routing_congestion_cnt += 1;
+            num_congestion_blocks += 1;
 
             /* 
              Still some blocks in the lower bucket remains unmoved
                Means, the upper bucket is full and congested
              */
-            congested_buckets.push(upper);            
+            congested_buckets.push(upper);
+            congestion = true;
         }
+    }
+
+    if congestion {
+        routing_congestion_cnt += 1;
     }
 }
 
 unsafe fn experimental_function() {
-    let mut total_sim_steps: u64 = two.pow(12) as u64;
+    let mut total_sim_steps: u64 = two.pow(22) as u64;
     let mut burst_cnt: u64 = 16;
 
     oram_exp(
@@ -837,7 +931,7 @@ unsafe fn experimental_function() {
         6,
         1,
         (burst_cnt), /* Only access few elements at the beginnig */
-        (total_sim_steps - burst_cnt),  /* Then perform nothing for rest of the time */
+        (2048),  /* Then perform nothing for rest of the time */
               total_sim_steps,
     );
 }
