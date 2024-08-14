@@ -79,7 +79,7 @@ static mut epoch: u32 = 14; //2(N-1)
 static mut ITR_CNT: u64 = 1024; /* The experiment will run for this amount of time */
 static mut rate_ratio: u32 = 10; //Ratio of server's processing : Client's processing
 static mut two: u32 = 2;
-static mut idx: usize = 0;
+static mut enable_access: bool = true;
 static mut tu: u64 = 0; /* Count of time unit */
 static mut read_underflow_cnt: u64 = 0; /* The number of times the read operation failed */
 static mut write_failure_cnt: u64 = 0; /* The number of times the write operation failed */
@@ -559,15 +559,6 @@ unsafe fn oram_exp(
 
     /* Local variable */
     ITR_CNT = _ITR_CNT; /* The experiment will run until t reaches itr_cnt */
-    let mut node_que: VecDeque<u32> = VecDeque::new(); /* Queue of parent nodes */
-    let mut cur_burst_cnt = 0;
-    let mut relax_cnt = 0;
-    //Initialize the randomness
-    let mut randomness = rand::thread_rng();
-    let mut r_dist = Uniform::new_inclusive(two.pow(L - 1), (two.pow(L) - 1));
-    let mut x_dist = Uniform::new_inclusive(two.pow(L - 1), (two.pow(L) - 1));
-    let mut w_dist = Uniform::new_inclusive(1, (two.pow(L - 1) - 1));
-
     printdbgln!(
         1,
         "Experimentation started at: {} with parameters: N = {}, Z = {}, rate_ratio = {}, max_burst_cnt = {}, min_relax_cnt = {}, ITR_CNT = {}",
@@ -591,32 +582,20 @@ unsafe fn oram_exp(
         simulate_oram_init(&mut tree);
     } /* Mutex automatically unlocked here */
 
-    node_que.push_front(1); /* At first push the root bucket. Located in tree[0], but has label = 1 */
     tu = 0; /* Initialize with time count 0 */
+    enable_access = true;
 
     // Spawn a new thread to run `route()`
-    let handle = thread::spawn(|| {
+    let route_thread_handle = thread::spawn(|| {
         route();
     });
-
-    /* Do the experiment until a specified time */
-    while tu < ITR_CNT {
-        if (cur_burst_cnt < max_burst_cnt) {
-            simulate_oram_access(&mut randomness, &mut r_dist, &mut w_dist, &mut x_dist);
-
-            cur_burst_cnt += 1;
-        } else {
-            if (relax_cnt < min_relax_cnt) {
-                relax_cnt += 1;
-            } else {
-                cur_burst_cnt = 0;
-                relax_cnt = 0;
-            }
-        }
-    }
-
-    // Wait for the spawned thread to finish
-    handle.join().unwrap();
+    // Spawn a new thread to run `clinet_server_interaction()`
+    let csi_thread_handle = thread::spawn(|| {
+        clinet_server_interaction();
+    });
+    // Wait for the spawned threads to finish
+    route_thread_handle.join().unwrap();
+    csi_thread_handle.join().unwrap();
 
     oram_print_stat(false);
 
@@ -627,17 +606,56 @@ unsafe fn oram_exp(
     );
 }
 
+unsafe fn clinet_server_interaction(){
+    let mut cur_burst_cnt = 0;
+    let mut relax_cnt = 0;
+    //Initialize the randomness
+    let mut randomness = rand::thread_rng();
+    let mut r_dist = Uniform::new_inclusive(two.pow(L - 1), (two.pow(L) - 1));
+    let mut x_dist = Uniform::new_inclusive(two.pow(L - 1), (two.pow(L) - 1));
+    let mut w_dist = Uniform::new_inclusive(1, (two.pow(L - 1) - 1));
+
+    /* Do the experiment until a specified time */
+    while tu < ITR_CNT {
+        if enable_access {
+            if (cur_burst_cnt < max_burst_cnt) {
+                simulate_oram_access(&mut randomness, &mut r_dist, &mut w_dist, &mut x_dist);
+    
+                cur_burst_cnt += 1;
+            } else {
+                if (relax_cnt < min_relax_cnt) {
+                    relax_cnt += 1;
+                } else {
+                    cur_burst_cnt = 0;
+                    relax_cnt = 0;
+                }
+            }
+
+            /* After doing access, disabling it
+               Again it will be enabled from route()
+             */
+            enable_access = false;  
+        }
+    }
+}
+
 unsafe fn route() {
     let mut node_que: VecDeque<u32> = VecDeque::new(); /* Queue of parent nodes */
     let mut process_left_edge: bool = true;
     let mut lower: u32;
+    let mut locked_steps: u32;
+
     node_que.push_front(1); /* At first push the root bucket. Located in tree[0], but has label = 1 */
 
     /* Run the thread until the specified time */
     while tu < ITR_CNT {
-        /* TODO: Run it according to the rate ratio */
+        let mut tree = g_tree.lock().unwrap();
+        locked_steps = 0;
+
+        while locked_steps < rate_ratio
         {
-            let mut tree = g_tree.lock().unwrap();
+            printdbgln!(1, "Route() at tu: {}", tu + locked_steps as u64);
+
             /* During each step, two different edges are processed */
             if let Some(upper) = node_que.pop_back() {
                 if process_left_edge {
@@ -650,7 +668,7 @@ unsafe fn route() {
                 let (mut muUp, mut muDn) = calcMovement(&mut tree, upper, lower);
 
                 permute(&mut tree, upper, lower, &mut muUp, &mut muDn);
-                tu += 1;
+                locked_steps += 1;
 
                 node_que.push_front(lower);
             } else {
@@ -658,7 +676,7 @@ unsafe fn route() {
             }
 
             /* Re-initialize the queue */
-            if (tu % (epoch as u64)) == 0 {
+            if ((tu + locked_steps as u64) % (epoch as u64)) == 0 {
                 //epoch is global variable
                 node_que.clear();
                 node_que.push_front(1);
@@ -670,8 +688,21 @@ unsafe fn route() {
              */
             process_left_edge = !process_left_edge;
 
-        } /* Mutex automatically unlocked here */
+        }
+
+        /* As inner loop executed for rate_ratio steps, increament tu accordingly */
+        tu += rate_ratio as u64;
+
+        /* 
+           Mutex automatically unlocked here.
+           So, before the next starting of the inner loop
+           access() gets a chance to execute.
+         */
+
+        /* Enable the client server to process access() */
+        enable_access = true;
     }
+
 }
 
 unsafe fn simulate_oram_access(
@@ -682,6 +713,8 @@ unsafe fn simulate_oram_access(
 ) -> bool {
     let mut success: bool = false;
     let mut tree = g_tree.lock().unwrap();
+
+    printdbgln!(1, "Access() at tu: {}", tu);
 
     /* Perform one read */
     success = simulate_oram_remove(&mut tree, &mut randomness, &mut r_dist);
@@ -963,7 +996,7 @@ unsafe fn permute(
 }
 
 unsafe fn experimental_function() {
-    let mut total_sim_steps: u64 = two.pow(22) as u64;
+    let mut total_sim_steps: u64 = two.pow(6) as u64;
     let mut burst_cnt: u64 = 128;
 
     oram_exp(
