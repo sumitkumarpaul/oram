@@ -17,6 +17,7 @@ use std::fs::File;
 use std::io::Result;
 use std::io::Write;
 use std::mem::MaybeUninit;
+use std::sync::mpsc;
 use std::sync::Mutex;
 use std::thread;
 use tfhe::prelude::*;
@@ -79,7 +80,6 @@ static mut epoch: u32 = 14; //2(N-1)
 static mut ITR_CNT: u64 = 1024; /* The experiment will run for this amount of time */
 static mut rate_ratio: u32 = 10; //Ratio of server's processing : Client's processing
 static mut two: u32 = 2;
-static mut enable_access: bool = true;
 static mut tu: u64 = 0; /* Count of time unit */
 static mut read_underflow_cnt: u64 = 0; /* The number of times the read operation failed */
 static mut write_failure_cnt: u64 = 0; /* The number of times the write operation failed */
@@ -583,16 +583,21 @@ unsafe fn oram_exp(
     } /* Mutex automatically unlocked here */
 
     tu = 0; /* Initialize with time count 0 */
-    enable_access = true;
+
+    /* For synchronization between two threads */
+    let (txFrmRoute, rxFrmRoute): (mpsc::Sender<bool>, mpsc::Receiver<bool>) = mpsc::channel();
+    let (txFrmCsi, rxFrmCsi): (mpsc::Sender<bool>, mpsc::Receiver<bool>) = mpsc::channel();
+
+    // Spawn a new thread to run `clinet_server_interaction()`
+    let csi_thread_handle = thread::spawn(|| {
+        clinet_server_interaction(txFrmCsi, rxFrmRoute);
+    });
 
     // Spawn a new thread to run `route()`
     let route_thread_handle = thread::spawn(|| {
-        route();
+        route(txFrmRoute, rxFrmCsi);
     });
-    // Spawn a new thread to run `clinet_server_interaction()`
-    let csi_thread_handle = thread::spawn(|| {
-        clinet_server_interaction();
-    });
+
     // Wait for the spawned threads to finish
     route_thread_handle.join().unwrap();
     csi_thread_handle.join().unwrap();
@@ -606,7 +611,10 @@ unsafe fn oram_exp(
     );
 }
 
-unsafe fn clinet_server_interaction(){
+unsafe fn clinet_server_interaction(
+    txFrmCsi: mpsc::Sender<bool>,
+    rxFrmRoute: mpsc::Receiver<bool>,
+) {
     let mut cur_burst_cnt = 0;
     let mut relax_cnt = 0;
     //Initialize the randomness
@@ -617,29 +625,29 @@ unsafe fn clinet_server_interaction(){
 
     /* Do the experiment until a specified time */
     while tu < ITR_CNT {
-        if enable_access {
-            if (cur_burst_cnt < max_burst_cnt) {
-                simulate_oram_access(&mut randomness, &mut r_dist, &mut w_dist, &mut x_dist);
-    
-                cur_burst_cnt += 1;
-            } else {
-                if (relax_cnt < min_relax_cnt) {
-                    relax_cnt += 1;
-                } else {
+        let _ = rxFrmRoute.recv();
+        if (cur_burst_cnt < max_burst_cnt) {
+            simulate_oram_access(&mut randomness, &mut r_dist, &mut w_dist, &mut x_dist);
+
+            cur_burst_cnt += 1;
+        } else {
+            if (relax_cnt < min_relax_cnt) {
+                relax_cnt = (relax_cnt + 1) % min_relax_cnt;
+
+                if (relax_cnt == 0) {
                     cur_burst_cnt = 0;
-                    relax_cnt = 0;
                 }
             }
-
-            /* After doing access, disabling it
-               Again it will be enabled from route()
-             */
-            enable_access = false;  
         }
+
+        /* After doing access, disabling it
+          Again it will be enabled from route()
+        */
+        txFrmCsi.send(true);
     }
 }
 
-unsafe fn route() {
+unsafe fn route(txFrmRoute: mpsc::Sender<bool>, rxFrmCsi: mpsc::Receiver<bool>) {
     let mut node_que: VecDeque<u32> = VecDeque::new(); /* Queue of parent nodes */
     let mut process_left_edge: bool = true;
     let mut lower: u32;
@@ -647,14 +655,18 @@ unsafe fn route() {
 
     node_que.push_front(1); /* At first push the root bucket. Located in tree[0], but has label = 1 */
 
+    //CSI thread is waiting, so at the beginning send a dummy start message to the CSI thread
+    txFrmRoute.send(true);
+
     /* Run the thread until the specified time */
     while tu < ITR_CNT {
+        let _ = rxFrmCsi.recv();
+
         let mut tree = g_tree.lock().unwrap();
         locked_steps = 0;
 
-        while locked_steps < rate_ratio
-        {
-            printdbgln!(1, "Route() at tu: {}", tu + locked_steps as u64);
+        while locked_steps < rate_ratio {
+            printdbgln!(1, "tu: {} Route()", tu + locked_steps as u64);
 
             /* During each step, two different edges are processed */
             if let Some(upper) = node_que.pop_back() {
@@ -682,27 +694,25 @@ unsafe fn route() {
                 node_que.push_front(1);
             }
 
-            /* 
-               If current iteration processes left edge,
-               then the next iteration will process the right edge and vice-versa.
-             */
+            /*
+              If current iteration processes left edge,
+              then the next iteration will process the right edge and vice-versa.
+            */
             process_left_edge = !process_left_edge;
-
         }
 
         /* As inner loop executed for rate_ratio steps, increament tu accordingly */
         tu += rate_ratio as u64;
 
-        /* 
-           Mutex automatically unlocked here.
-           So, before the next starting of the inner loop
-           access() gets a chance to execute.
-         */
+        /*
+          Mutex automatically unlocked here.
+          So, before the next starting of the inner loop
+          access() gets a chance to execute.
+        */
 
         /* Enable the client server to process access() */
-        enable_access = true;
+        txFrmRoute.send(true);
     }
-
 }
 
 unsafe fn simulate_oram_access(
@@ -712,9 +722,10 @@ unsafe fn simulate_oram_access(
     mut x_dist: &mut Uniform<u32>,
 ) -> bool {
     let mut success: bool = false;
+
     let mut tree = g_tree.lock().unwrap();
 
-    printdbgln!(1, "Access() at tu: {}", tu);
+    printdbg!(1, " Access()");
 
     /* Perform one read */
     success = simulate_oram_remove(&mut tree, &mut randomness, &mut r_dist);
@@ -996,15 +1007,15 @@ unsafe fn permute(
 }
 
 unsafe fn experimental_function() {
-    let mut total_sim_steps: u64 = two.pow(6) as u64;
-    let mut burst_cnt: u64 = 128;
+    let mut total_sim_steps: u64 = two.pow(4) as u64;
+    let mut burst_cnt: u64 = 2;
 
     oram_exp(
         two.pow(6),
         6,
-        1,
+        3,
         (burst_cnt), /* Only access few elements at the beginnig */
-        (1024),      /* Then perform nothing for rest of the time */
+        (2),      /* Then perform nothing for rest of the time */
         total_sim_steps,
     );
 }
