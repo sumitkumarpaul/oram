@@ -13,7 +13,9 @@ use rand::rngs::ThreadRng;
 use rand::Rng;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::fs;
 use std::fs::File;
+use std::path::{Path, PathBuf};
 use std::io::Result;
 use std::io::Write;
 use std::mem::MaybeUninit;
@@ -83,7 +85,9 @@ static mut two: u32 = 2;
 static mut tu: u64 = 0; /* Count of time unit */
 static mut read_underflow_cnt: u64 = 0; /* The number of times the read operation failed */
 static mut write_failure_cnt: u64 = 0; /* The number of times the write operation failed */
+static mut write_failure_percentage: f64 = 0.0; /* The percentage of failed write operation */
 static mut routing_congestion_cnt: u64 = 0; /* The number of times the background operation caused buffer overflow */
+static mut routing_congestion_percentage: f64 = 0.0; /* The percentage of congested steps during routing */
 static mut num_congestion_blocks: u64 = 0; /* The number of blocks affected due to congestion */
 static mut max_burst_cnt: u64 = 0; /* The number of blocks the client retrives in a burst */
 static mut min_relax_cnt: u64 = 0; /* The amount of time (in terms of step processing), the client relaxes after each burst */
@@ -561,15 +565,7 @@ unsafe fn oram_exp(
     ITR_CNT = _ITR_CNT; /* The experiment will run until t reaches itr_cnt */
     printdbgln!(
         1,
-        "Experimentation started at: {} with parameters: N = {}, Z = {}, rate_ratio = {}, max_burst_cnt = {}, min_relax_cnt = {}, ITR_CNT = {}",
-        Local::now().format("%Y-%m-%d %H:%M:%S.%6f").to_string(),
-        N,
-        Z,
-        rate_ratio,
-        max_burst_cnt,
-        min_relax_cnt,
-        ITR_CNT
-    );
+        "Experimentation started at: {}", Local::now().format("%Y-%m-%d %H:%M:%S.%6f").to_string());
 
     {
         let mut tree = g_tree.lock().unwrap();
@@ -666,7 +662,7 @@ unsafe fn route(txFrmRoute: mpsc::Sender<bool>, rxFrmCsi: mpsc::Receiver<bool>) 
         locked_steps = 0;
 
         while locked_steps < rate_ratio {
-            printdbgln!(1, "tu: {} Route()", tu + locked_steps as u64);
+            printdbgln!(0, "tu: {} Route()", tu + locked_steps as u64);
 
             /* During each step, two different edges are processed */
             if let Some(upper) = node_que.pop_back() {
@@ -725,7 +721,7 @@ unsafe fn simulate_oram_access(
 
     let mut tree = g_tree.lock().unwrap();
 
-    printdbg!(1, " Access()");
+    printdbg!(0, " Access()");
 
     /* Perform one read */
     success = simulate_oram_remove(&mut tree, &mut randomness, &mut r_dist);
@@ -802,14 +798,35 @@ unsafe fn simulate_oram_init(tree: &mut Vec<Bucket>) {
     }
 }
 
-unsafe fn oram_print_stat(print_detailed: bool) {
+unsafe fn oram_print_stat(print_details: bool) {
     let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
-    let filename = format!("detailed_log_{}.csv", timestamp);
+    // Create a folder with the timestamp as its name
+    let folder_name = format!("Log_{}", timestamp);
+    let folder_path = Path::new(&folder_name);
+    let mut detailedFile: File;
+    let mut overallFile: File;
+
+    match fs::create_dir(folder_path) {
+        Ok(_) => {},
+        Err(e) => eprintln!("Failed to create folder: {}", e),
+    }
+    let overall_filename = folder_path.join("Overall_statistics.txt");
+    // Handle the Result returned by File::create using match
+    overallFile = match File::create(&overall_filename) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("Failed to create file: {}", e);
+            return; // Exit the function if file creation fails
+        }
+    };
+
+    let detailed_filename = folder_path.join("detailed_log.csv");
+
     let mut tree = g_tree.lock().unwrap();
 
-    if print_detailed {
+    if print_details {
         // Handle the Result returned by File::create using match
-        let mut file = match File::create(&filename) {
+        detailedFile = match File::create(&detailed_filename) {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("Failed to create file: {}", e);
@@ -818,13 +835,13 @@ unsafe fn oram_print_stat(print_detailed: bool) {
         };
 
         // Handle the Result returned by writeln! using match
-        if let Err(e) = writeln!(file, "Bucket,a_cnt,r_cnt,w_cnt,x_cnt,cur_occupancy,avg,var,max,out_up,out_lft,out_rgt,in_up,in_lft,in_rgt,sty") {
+        if let Err(e) = writeln!(detailedFile, "Bucket,a_cnt,r_cnt,w_cnt,x_cnt,cur_occupancy,avg,var,max,out_up,out_lft,out_rgt,in_up,in_lft,in_rgt,sty") {
             eprintln!("Failed to write to file: {}", e);
             return; // Exit the function if writing fails
         }
 
         for b in 1..=(two.pow(L) - 1) {
-            tree[b as usize - 1].print_detailed_stat(&mut file);
+            tree[b as usize - 1].print_detailed_stat(&mut detailedFile);
         }
 
         /* Note: We are not calculating read error. i.e., the block must be availabel at some leaf but is not.
@@ -833,7 +850,70 @@ unsafe fn oram_print_stat(print_detailed: bool) {
         let mut congested_buckets = g_congested_buckets.lock().unwrap();
     }
 
-    printdbgln!(1, "Read underflow count: {}, write failure count: {}, routing congestion count: {}, global max load: {}, total number of removals: {}, total number of placements: {}, last placement occurred at: {}", read_underflow_cnt, write_failure_cnt, routing_congestion_cnt, global_max_bucket_load, total_num_removed, total_num_placed, last_placement_tu);
+    printdbgln!(
+        1,
+        "===================================================================================================================
+Experimentation parameters: N = {}, Z = {}, rate_ratio = {}, max_burst_cnt = {}, min_relax_cnt = {}, ITR_CNT = {}
+===================================================================================================================",
+        N,
+        Z,
+        rate_ratio,
+        max_burst_cnt,
+        min_relax_cnt,
+        ITR_CNT
+    );
+    if let Err(e) = writeln!(overallFile, "===================================================================================================================
+Experimentation parameters: N = {}, Z = {}, rate_ratio = {}, max_burst_cnt = {}, min_relax_cnt = {}, ITR_CNT = {}
+===================================================================================================================",
+    N,
+    Z,
+    rate_ratio,
+    max_burst_cnt,
+    min_relax_cnt,
+    ITR_CNT) {
+        eprintln!("Failed to write to file: {}", e);
+        return; // Exit the function if writing fails
+    }
+
+    write_failure_percentage = ((write_failure_cnt*100) as f64 / (ITR_CNT - read_underflow_cnt) as f64);
+    routing_congestion_percentage = ((routing_congestion_cnt*100) as f64 / ITR_CNT as f64);
+
+    printdbgln!(1, "Read underflow count: {}
+Write failure count: {}({} %)
+Routing congestion count: {}({} %)
+Global max load: {}
+Total number of removals: {}
+Total number of placements: {}
+Last placement occurred at: {}",
+    read_underflow_cnt,
+    write_failure_cnt,
+    write_failure_percentage,
+    routing_congestion_cnt,
+    routing_congestion_percentage,
+    global_max_bucket_load,
+    total_num_removed,
+    total_num_placed,
+    last_placement_tu); 
+        
+    if let Err(e) = writeln!(overallFile, "Read underflow count: {}
+Write failure count: {}({} %)
+Routing congestion count: {}({} %)
+Global max load: {}
+Total number of removals: {}
+Total number of placements: {}
+Last placement occurred at: {}",
+    read_underflow_cnt,
+    write_failure_cnt,
+    write_failure_percentage,
+    routing_congestion_cnt,
+    routing_congestion_percentage,
+    global_max_bucket_load,
+    total_num_removed,
+    total_num_placed,
+    last_placement_tu) {
+        eprintln!("Failed to write to file: {}", e);
+        return; // Exit the function if writing fails
+    }
 }
 
 unsafe fn calcMovement(tree: &mut Vec<Bucket>, upper: u32, lower: u32) -> (Vec<i32>, Vec<i32>) {
@@ -1007,15 +1087,20 @@ unsafe fn permute(
 }
 
 unsafe fn experimental_function() {
-    let mut total_sim_steps: u64 = two.pow(4) as u64;
-    let mut burst_cnt: u64 = 2;
+    let mut total_sim_steps: u64 = two.pow(17) as u64;//22 Working
+    let mut burst_cnt: u64 = 5;//two.pow(6) as u64;
+    let mut relax_cnt = 1000;  //u64 = two.pow() as u64;
+    /* Unexpectedly, relax_cnt = 500 gives 3% congestion, whereas relax_cnt = 50 gives 0.61%
+       The reason is, for relax_cnt = 50, there is a high read underflow
+       hence, the effective relax count becomes quite less
+    */
 
     oram_exp(
-        two.pow(6),
+        two.pow(6),//11 working
         6,
-        3,
+        1,
         (burst_cnt), /* Only access few elements at the beginnig */
-        (2),      /* Then perform nothing for rest of the time */
-        total_sim_steps,
+        (relax_cnt), /* Then perform nothing for rest of the time */
+        total_sim_steps,//total_sim_steps/_N should be 2^11?
     );
 }
