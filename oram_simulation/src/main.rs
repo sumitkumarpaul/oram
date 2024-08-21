@@ -11,19 +11,22 @@ use once_cell::sync::Lazy;
 use rand::distributions::{Distribution, Uniform};
 use rand::rngs::ThreadRng;
 use rand::Rng;
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fs;
 use std::fs::File;
-use std::path::{Path, PathBuf};
-use std::io::Result;
+use std::io::{BufWriter, Result};
 use std::io::Write;
 use std::mem::MaybeUninit;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::Mutex;
 use std::thread;
 use tfhe::prelude::*;
 use tfhe::ClientKey;
+use std::fs::{OpenOptions};
+use std::io::{Read, Seek, SeekFrom};
 
 // Define a global mutable list (vector) wrapped in a Mutex for thread safety
 static g_congested_buckets: Lazy<Mutex<Vec<u32>>> = Lazy::new(|| Mutex::new(vec![]));
@@ -73,7 +76,7 @@ static mut N: u32 = 8;
 static mut L: u32 = 4;
 static mut R: u32 = 1;
 static mut C: u32 = 1; /* Initial number of replicas */
-static mut Z: u32 = 6;
+static mut Z: u32 = 8;
 static mut B: u32 = 4096; /* Common block size is: 4KB
                           But RLWE can encrypt 3KB per ciphertext.
                           So, block size must be set to multiple of 3KB.
@@ -95,6 +98,7 @@ static mut global_max_bucket_load: u32 = 0; /* Maximum load occurred in any buck
 static mut total_num_removed: u64 = 0; /* Total number of blocks removed from its leaf location */
 static mut total_num_placed: u64 = 0; /* How many number of blocks are returned to place by the routing process */
 static mut last_placement_tu: u64 = 0; /* When the last block is placed to its destined leaf */
+static mut clrOld: bool = false; /* Clear previous prints */
 
 #[derive(Debug)]
 struct m {
@@ -563,9 +567,54 @@ unsafe fn oram_exp(
 
     /* Local variable */
     ITR_CNT = _ITR_CNT; /* The experiment will run until t reaches itr_cnt */
+
+    let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
+    // Create a folder with the timestamp as its name
+    let folder_name = format!("Log_{}", timestamp);
+    let folder_path = Path::new(&folder_name);
+
+    match fs::create_dir(folder_path) {
+        Ok(_) => {}
+        Err(e) => eprintln!("Failed to create folder: {}", e),
+    }
+    let overall_filename = folder_path.join("Overall_statistics.txt");
+    // Handle the Result returned by File::create using match
+    let mut overallStatFileHandle = match File::create(&overall_filename) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("Failed to create file: {}", e);
+            return; // Exit the function if file creation fails
+        }
+    };
+
+    printdbgln!(1, "ORAM experiment started at: {}", timestamp);
+
     printdbgln!(
         1,
-        "Experimentation started at: {}", Local::now().format("%Y-%m-%d %H:%M:%S.%6f").to_string());
+        "===================================================================================================================
+ORAM experiment parameters: N = {}, Z = {}, rate_ratio = {}, max_burst_cnt = {}, min_relax_cnt = {}, ITR_CNT = {}
+===================================================================================================================",
+        N,
+        Z,
+        rate_ratio,
+        max_burst_cnt,
+        min_relax_cnt,
+        ITR_CNT
+    );
+
+    /* Write to the log file */
+    if let Err(e) = writeln!(overallStatFileHandle, "===================================================================================================================
+ORAM experiment parameters: N = {}, Z = {}, rate_ratio = {}, max_burst_cnt = {}, min_relax_cnt = {}, ITR_CNT = {}
+===================================================================================================================",
+    N,
+    Z,
+    rate_ratio,
+    max_burst_cnt,
+    min_relax_cnt,
+    ITR_CNT) {
+        eprintln!("Failed to write to file: {}", e);
+        return; // Exit the function if writing fails
+    }
 
     {
         let mut tree = g_tree.lock().unwrap();
@@ -590,15 +639,13 @@ unsafe fn oram_exp(
     });
 
     // Spawn a new thread to run `route()`
-    let route_thread_handle = thread::spawn(|| {
-        route(txFrmRoute, rxFrmCsi);
+    let route_thread_handle = thread::spawn(move || {
+        route(txFrmRoute, rxFrmCsi, &mut overallStatFileHandle);
     });
 
     // Wait for the spawned threads to finish
     route_thread_handle.join().unwrap();
     csi_thread_handle.join().unwrap();
-
-    oram_print_stat(false);
 
     printdbgln!(
         1,
@@ -643,11 +690,15 @@ unsafe fn clinet_server_interaction(
     }
 }
 
-unsafe fn route(txFrmRoute: mpsc::Sender<bool>, rxFrmCsi: mpsc::Receiver<bool>) {
+unsafe fn route(
+    txFrmRoute: mpsc::Sender<bool>,
+    rxFrmCsi: mpsc::Receiver<bool>,
+    overallStatFileHandle: &mut File,
+) {
     let mut node_que: VecDeque<u32> = VecDeque::new(); /* Queue of parent nodes */
     let mut process_left_edge: bool = true;
     let mut lower: u32;
-    let mut locked_steps: u32;
+    let mut locked_steps: u32;    
 
     node_que.push_front(1); /* At first push the root bucket. Located in tree[0], but has label = 1 */
 
@@ -688,6 +739,11 @@ unsafe fn route(txFrmRoute: mpsc::Sender<bool>, rxFrmCsi: mpsc::Receiver<bool>) 
                 //epoch is global variable
                 node_que.clear();
                 node_que.push_front(1);
+            }
+
+            /* Print the partial statistics */
+            if (tu + locked_steps as u64 + 1) % (ITR_CNT / 10) == 0 {
+                oram_print_stat(false, overallStatFileHandle);
             }
 
             /*
@@ -798,119 +854,125 @@ unsafe fn simulate_oram_init(tree: &mut Vec<Bucket>) {
     }
 }
 
-unsafe fn oram_print_stat(print_details: bool) {
-    let timestamp = Local::now().format("%Y-%m-%d_%H-%M-%S").to_string();
-    // Create a folder with the timestamp as its name
-    let folder_name = format!("Log_{}", timestamp);
-    let folder_path = Path::new(&folder_name);
-    let mut detailedFile: File;
-    let mut overallFile: File;
+unsafe fn oram_print_stat(print_details: bool, overallFile: &mut File) {
+    let mut simulation_percentage: f64;
 
-    match fs::create_dir(folder_path) {
-        Ok(_) => {},
-        Err(e) => eprintln!("Failed to create folder: {}", e),
-    }
-    let overall_filename = folder_path.join("Overall_statistics.txt");
-    // Handle the Result returned by File::create using match
-    overallFile = match File::create(&overall_filename) {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("Failed to create file: {}", e);
-            return; // Exit the function if file creation fails
-        }
-    };
+    #[cfg(any())]
+    {
+        let mut detailedFile: File;
+        let detailed_filename = folder_path.join("detailed_log.csv");
 
-    let detailed_filename = folder_path.join("detailed_log.csv");
+        if print_details {
+            // Handle the Result returned by File::create using match
+            detailedFile = match File::create(&detailed_filename) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("Failed to create file: {}", e);
+                    return; // Exit the function if file creation fails
+                }
+            };
 
-    let mut tree = g_tree.lock().unwrap();
-
-    if print_details {
-        // Handle the Result returned by File::create using match
-        detailedFile = match File::create(&detailed_filename) {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!("Failed to create file: {}", e);
-                return; // Exit the function if file creation fails
-            }
-        };
-
-        // Handle the Result returned by writeln! using match
-        if let Err(e) = writeln!(detailedFile, "Bucket,a_cnt,r_cnt,w_cnt,x_cnt,cur_occupancy,avg,var,max,out_up,out_lft,out_rgt,in_up,in_lft,in_rgt,sty") {
+            // Handle the Result returned by writeln! using match
+            if let Err(e) = writeln!(detailedFile, "Bucket,a_cnt,r_cnt,w_cnt,x_cnt,cur_occupancy,avg,var,max,out_up,out_lft,out_rgt,in_up,in_lft,in_rgt,sty") {
             eprintln!("Failed to write to file: {}", e);
             return; // Exit the function if writing fails
         }
 
-        for b in 1..=(two.pow(L) - 1) {
-            tree[b as usize - 1].print_detailed_stat(&mut detailedFile);
-        }
+            for b in 1..=(two.pow(L) - 1) {
+                tree[b as usize - 1].print_detailed_stat(&mut detailedFile);
+            }
 
-        /* Note: We are not calculating read error. i.e., the block must be availabel at some leaf but is not.
-         Basically, if the server is honest(but curious) then that value must be zero, if routing_congestion_cnt = 0
-        */
-        let mut congested_buckets = g_congested_buckets.lock().unwrap();
+            /* Note: We are not calculating read error. i.e., the block must be availabel at some leaf but is not.
+             Basically, if the server is honest(but curious) then that value must be zero, if routing_congestion_cnt = 0
+            */
+            let mut congested_buckets = g_congested_buckets.lock().unwrap();
+        }
     }
+
+    write_failure_percentage =
+        ((write_failure_cnt * 100) as f64 / (ITR_CNT - read_underflow_cnt) as f64);
+    routing_congestion_percentage = ((routing_congestion_cnt * 100) as f64 / ITR_CNT as f64);
+
+    simulation_percentage = (((tu+1) * 100) as f64 / ITR_CNT as f64);
+
+    if clrOld {
+        // ANSI escape code to move the cursor up 8 lines
+        print!("\x1b[8A");
+
+        // ANSI escape code to clear from cursor to end of screen
+        print!("\x1b[J");
+
+        // Flush stdout to apply changes
+        std::io::stdout().flush().unwrap();
+
+    // Read the entire file into a string
+    let mut content = String::new();
+    overallFile.read_to_string(&mut content);
+
+    // Split the content by lines and collect them
+    let mut lines: Vec<&str> = content.lines().collect();
+    print!("Number of lines: {} {}", lines.len(), content.len());
+
+    // Remove the last n lines
+    lines.truncate(lines.len() - 4);
+
+    // Join the remaining lines back together
+    let new_content = lines.join("\n") + "\n";
+
+    // Truncate the file and write the new content
+    overallFile.set_len(0);  // Clear the file
+    overallFile.seek(SeekFrom::Start(0));  // Move the cursor to the start
+    overallFile.write_all(new_content.as_bytes());
+    overallFile.flush();
+
+    }
+
+    /* From the second time onwards, it will be set */
+    clrOld = true;
 
     printdbgln!(
         1,
-        "===================================================================================================================
-Experimentation parameters: N = {}, Z = {}, rate_ratio = {}, max_burst_cnt = {}, min_relax_cnt = {}, ITR_CNT = {}
-===================================================================================================================",
-        N,
-        Z,
-        rate_ratio,
-        max_burst_cnt,
-        min_relax_cnt,
-        ITR_CNT
+        "**** Simulation done: {} %, current statistics =>
+Read underflow count: {}
+Write failure count: {}({} %)
+Routing congestion count: {}({} %)
+Global max load: {}
+Total number of removals: {}
+Total number of placements: {}
+Last placement occurred at: {}",
+        simulation_percentage.ceil(),
+        read_underflow_cnt,
+        write_failure_cnt,
+        write_failure_percentage,
+        routing_congestion_cnt,
+        routing_congestion_percentage,
+        global_max_bucket_load,
+        total_num_removed,
+        total_num_placed,
+        last_placement_tu
     );
-    if let Err(e) = writeln!(overallFile, "===================================================================================================================
-Experimentation parameters: N = {}, Z = {}, rate_ratio = {}, max_burst_cnt = {}, min_relax_cnt = {}, ITR_CNT = {}
-===================================================================================================================",
-    N,
-    Z,
-    rate_ratio,
-    max_burst_cnt,
-    min_relax_cnt,
-    ITR_CNT) {
-        eprintln!("Failed to write to file: {}", e);
-        return; // Exit the function if writing fails
-    }
 
-    write_failure_percentage = ((write_failure_cnt*100) as f64 / (ITR_CNT - read_underflow_cnt) as f64);
-    routing_congestion_percentage = ((routing_congestion_cnt*100) as f64 / ITR_CNT as f64);
-
-    printdbgln!(1, "Read underflow count: {}
+    if let Err(e) = writeln!(
+        overallFile,
+        "**** Simulation done: {} %, current statistics =>
+Read underflow count: {}
 Write failure count: {}({} %)
 Routing congestion count: {}({} %)
 Global max load: {}
 Total number of removals: {}
 Total number of placements: {}
 Last placement occurred at: {}",
-    read_underflow_cnt,
-    write_failure_cnt,
-    write_failure_percentage,
-    routing_congestion_cnt,
-    routing_congestion_percentage,
-    global_max_bucket_load,
-    total_num_removed,
-    total_num_placed,
-    last_placement_tu); 
-        
-    if let Err(e) = writeln!(overallFile, "Read underflow count: {}
-Write failure count: {}({} %)
-Routing congestion count: {}({} %)
-Global max load: {}
-Total number of removals: {}
-Total number of placements: {}
-Last placement occurred at: {}",
-    read_underflow_cnt,
-    write_failure_cnt,
-    write_failure_percentage,
-    routing_congestion_cnt,
-    routing_congestion_percentage,
-    global_max_bucket_load,
-    total_num_removed,
-    total_num_placed,
-    last_placement_tu) {
+        simulation_percentage.ceil(),
+        read_underflow_cnt,
+        write_failure_cnt,
+        write_failure_percentage,
+        routing_congestion_cnt,
+        routing_congestion_percentage,
+        global_max_bucket_load,
+        total_num_removed,
+        total_num_placed,
+        last_placement_tu
+    ) {
         eprintln!("Failed to write to file: {}", e);
         return; // Exit the function if writing fails
     }
@@ -919,36 +981,79 @@ Last placement occurred at: {}",
 unsafe fn calcMovement(tree: &mut Vec<Bucket>, upper: u32, lower: u32) -> (Vec<i32>, Vec<i32>) {
     let mut l_upper: u32 = ((upper as f64).log2() as u32) + 1;
     let mut l_lower: u32 = l_upper + 1;
-    let mut muUp = Vec::new();
-    let mut muDn = Vec::new();
 
-    /* First upper bucket */
-    for i in 0..Z {
-        if tree[upper as usize - 1].blocks[i as usize].m.x == 0 {
-            muUp.push(EMPTY!());
-        } else {
-            if (lower == (tree[upper as usize - 1].blocks[i as usize].m.x >> (L - l_lower))) {
-                muUp.push(MOVE!());
+    #[cfg(all())]
+    {
+        let mut muUp = Vec::new();
+        let mut muDn = Vec::new();
+        /* First upper bucket */
+        for i in 0..Z {
+            if tree[upper as usize - 1].blocks[i as usize].m.x == 0 {
+                muUp.push(EMPTY!());
             } else {
-                muUp.push(NOT_MOVE!());
+                if (lower == (tree[upper as usize - 1].blocks[i as usize].m.x >> (L - l_lower))) {
+                    muUp.push(MOVE!());
+                } else {
+                    muUp.push(NOT_MOVE!());
+                }
             }
         }
-    }
-
-    /* Then check the lower bucket */
-    for i in 0..Z {
-        if tree[lower as usize - 1].blocks[i as usize].m.x == 0 {
-            muDn.push(EMPTY!());
-        } else {
-            if (lower == (tree[lower as usize - 1].blocks[i as usize].m.x >> (L - l_lower))) {
-                muDn.push(NOT_MOVE!());
+        /* Then check the lower bucket */
+        for i in 0..Z {
+            if tree[lower as usize - 1].blocks[i as usize].m.x == 0 {
+                muDn.push(EMPTY!());
             } else {
-                muDn.push(MOVE!());
+                if (lower == (tree[lower as usize - 1].blocks[i as usize].m.x >> (L - l_lower))) {
+                    muDn.push(NOT_MOVE!());
+                } else {
+                    muDn.push(MOVE!());
+                }
             }
         }
+
+        (muUp, muDn)
     }
 
-    (muUp, muDn)
+    #[cfg(any())]{
+    /* CPU level parrallelism is used to enhance the simulation speed */
+    /* At first analyze the upper bucket */
+    let muUp: Vec<_> = (0..Z)
+        .into_par_iter()
+        .map(|i| {
+            let block = &tree[upper as usize - 1].blocks[i as usize];
+
+            if block.m.x == 0 {
+                EMPTY!() // Push EMPTY
+            } else {
+                if lower == (block.m.x >> (L - l_lower)) {
+                    MOVE!() // Push MOVE
+                } else {
+                    NOT_MOVE!() // Push NOT_MOVE
+                }
+            }
+        })
+        .collect(); // Collect all results into a vector
+
+    /* Then analyze the lower bucket */
+    let muDn: Vec<_> = (0..Z)
+        .into_par_iter()
+        .map(|i| {
+            let block = &tree[lower as usize - 1].blocks[i as usize];
+
+            if block.m.x == 0 {
+                EMPTY!() // Push EMPTY
+            } else {
+                if lower == (block.m.x >> (L - l_lower)) {
+                    NOT_MOVE!() // Push NOT_MOVE
+                } else {
+                    MOVE!() // Push MOVE
+                }
+            }
+        })
+        .collect(); // Collect all results into a vector
+    
+        (muUp, muDn)
+    }
 }
 
 /* Inspired from the movement algorithm in sumit_draft.docx not according to the paper */
@@ -1087,20 +1192,20 @@ unsafe fn permute(
 }
 
 unsafe fn experimental_function() {
-    let mut total_sim_steps: u64 = two.pow(17) as u64;//22 Working
-    let mut burst_cnt: u64 = 5;//two.pow(6) as u64;
-    let mut relax_cnt = 1000;  //u64 = two.pow() as u64;
-    /* Unexpectedly, relax_cnt = 500 gives 3% congestion, whereas relax_cnt = 50 gives 0.61%
-       The reason is, for relax_cnt = 50, there is a high read underflow
-       hence, the effective relax count becomes quite less
-    */
+    let mut total_sim_steps: u64 = two.pow(22) as u64; //22 Working
+    let mut burst_cnt: u64 = 5; //two.pow(6) as u64;
+    let mut relax_cnt = 50; //u64 = two.pow() as u64;
+                            /* Unexpectedly, relax_cnt = 500 gives 3% congestion, whereas relax_cnt = 50 gives 0.61%
+                               The reason is, for relax_cnt = 50, there is a high read underflow
+                               hence, the effective relax count becomes quite less
+                            */
 
     oram_exp(
-        two.pow(6),//11 working
+        two.pow(11), //11 working//15 means 2^15*4KB blocks = 2^15*2^12 = 2^27 = 128MB
         6,
         1,
-        (burst_cnt), /* Only access few elements at the beginnig */
-        (relax_cnt), /* Then perform nothing for rest of the time */
-        total_sim_steps,//total_sim_steps/_N should be 2^11?
+        (burst_cnt),     /* Only access few elements at the beginnig */
+        (relax_cnt),     /* Then perform nothing for rest of the time */
+        total_sim_steps, //total_sim_steps/_N should be 2^11?
     );
 }
