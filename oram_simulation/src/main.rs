@@ -253,7 +253,7 @@ impl Bucket {
         for slot in 0..Z as usize {
             if self.blocks[slot].m.x != 0 {
                 removed_item = self.blocks[slot].d;
-                self.blocks[slot].m.x = 0;
+                self.blocks[slot].m.x = 0;//Mark the slot as empty
                 break;
             }
         }
@@ -578,14 +578,19 @@ unsafe fn oram_exp(
         Err(e) => eprintln!("Failed to create folder: {}", e),
     }
     let overall_filename = folder_path.join("Overall_statistics.txt");
-    // Handle the Result returned by File::create using match
-    let mut overallStatFileHandle = match File::create(&overall_filename) {
+    // Handle the Result returned by OpenOptions::new using match
+    let mut overallStatFileHandle = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)  // Create the file if it doesn't exist
+        .open(&overall_filename)
+    {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("Failed to create file: {}", e);
+            eprintln!("Failed to create or open file: {}", e);
             return; // Exit the function if file creation fails
         }
-    };
+    };    
 
     printdbgln!(1, "ORAM experiment started at: {}", timestamp);
 
@@ -856,6 +861,8 @@ unsafe fn simulate_oram_init(tree: &mut Vec<Bucket>) {
 
 unsafe fn oram_print_stat(print_details: bool, overallFile: &mut File) {
     let mut simulation_percentage: f64;
+    let mut read_underflow_percentage: f64;
+    let mut placement_percentage: f64;
 
     #[cfg(any())]
     {
@@ -890,10 +897,12 @@ unsafe fn oram_print_stat(print_details: bool, overallFile: &mut File) {
     }
 
     write_failure_percentage =
-        ((write_failure_cnt * 100) as f64 / (ITR_CNT - read_underflow_cnt) as f64);
-    routing_congestion_percentage = ((routing_congestion_cnt * 100) as f64 / ITR_CNT as f64);
+        ((write_failure_cnt * 100) as f64 / (write_failure_cnt + total_num_removed) as f64);
+    routing_congestion_percentage = ((routing_congestion_cnt * 100) as f64 / (tu+1) as f64);
 
     simulation_percentage = (((tu+1) * 100) as f64 / ITR_CNT as f64);
+    read_underflow_percentage = (((read_underflow_cnt) * 100) as f64 / (read_underflow_cnt + total_num_removed) as f64);
+    placement_percentage = (((total_num_placed) * 100) as f64 / total_num_removed as f64);
 
     if clrOld {
         // ANSI escape code to move the cursor up 8 lines
@@ -907,23 +916,34 @@ unsafe fn oram_print_stat(print_details: bool, overallFile: &mut File) {
 
     // Read the entire file into a string
     let mut content = String::new();
+    // Move the cursor back to the begining of the file
+    overallFile.seek(SeekFrom::Start(0));
     overallFile.read_to_string(&mut content);
 
     // Split the content by lines and collect them
     let mut lines: Vec<&str> = content.lines().collect();
-    print!("Number of lines: {} {}", lines.len(), content.len());
 
     // Remove the last n lines
-    lines.truncate(lines.len() - 4);
+    lines.truncate(lines.len() - 8);
 
     // Join the remaining lines back together
-    let new_content = lines.join("\n") + "\n";
+    let new_content = lines.join("\n")+"\n";
 
     // Truncate the file and write the new content
     overallFile.set_len(0);  // Clear the file
     overallFile.seek(SeekFrom::Start(0));  // Move the cursor to the start
     overallFile.write_all(new_content.as_bytes());
     overallFile.flush();
+
+    // Read the entire file into a string
+    let mut content1 = String::new();
+    // Move the cursor back to the begining of the file
+    overallFile.seek(SeekFrom::Start(0));
+    overallFile.read_to_string(&mut content1);
+
+    // Split the content by lines and collect them
+    let mut lines1: Vec<&str> = content1.lines().collect();
+    print!("After update: {}, number of lines: {}", content1.len(), lines1.len());
 
     }
 
@@ -933,15 +953,16 @@ unsafe fn oram_print_stat(print_details: bool, overallFile: &mut File) {
     printdbgln!(
         1,
         "**** Simulation done: {} %, current statistics =>
-Read underflow count: {}
+Read underflow count: {}({} %)
 Write failure count: {}({} %)
 Routing congestion count: {}({} %)
 Global max load: {}
 Total number of removals: {}
-Total number of placements: {}
+Total number of placements: {}({} %)
 Last placement occurred at: {}",
         simulation_percentage.ceil(),
         read_underflow_cnt,
+        read_underflow_percentage,
         write_failure_cnt,
         write_failure_percentage,
         routing_congestion_cnt,
@@ -949,21 +970,23 @@ Last placement occurred at: {}",
         global_max_bucket_load,
         total_num_removed,
         total_num_placed,
+        placement_percentage,
         last_placement_tu
     );
 
     if let Err(e) = writeln!(
         overallFile,
         "**** Simulation done: {} %, current statistics =>
-Read underflow count: {}
+Read underflow count: {}({} %)
 Write failure count: {}({} %)
 Routing congestion count: {}({} %)
 Global max load: {}
 Total number of removals: {}
-Total number of placements: {}
+Total number of placements: {}({} %)
 Last placement occurred at: {}",
         simulation_percentage.ceil(),
         read_underflow_cnt,
+        read_underflow_percentage,
         write_failure_cnt,
         write_failure_percentage,
         routing_congestion_cnt,
@@ -971,6 +994,7 @@ Last placement occurred at: {}",
         global_max_bucket_load,
         total_num_removed,
         total_num_placed,
+        placement_percentage,
         last_placement_tu
     ) {
         eprintln!("Failed to write to file: {}", e);
@@ -1192,9 +1216,9 @@ unsafe fn permute(
 }
 
 unsafe fn experimental_function() {
-    let mut total_sim_steps: u64 = two.pow(22) as u64; //22 Working
-    let mut burst_cnt: u64 = 5; //two.pow(6) as u64;
-    let mut relax_cnt = 50; //u64 = two.pow() as u64;
+    let mut total_sim_steps: u64 = two.pow(27) as u64; //22 Working
+    let mut burst_cnt: u64 = 50; //two.pow(6) as u64;
+    let mut relax_cnt = 500; //u64 = two.pow() as u64;
                             /* Unexpectedly, relax_cnt = 500 gives 3% congestion, whereas relax_cnt = 50 gives 0.61%
                                The reason is, for relax_cnt = 50, there is a high read underflow
                                hence, the effective relax count becomes quite less
