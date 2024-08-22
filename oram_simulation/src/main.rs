@@ -864,6 +864,8 @@ unsafe fn oram_print_stat(print_details: bool, overallFile: &mut File) {
     let mut read_underflow_percentage: f64;
     let mut placement_percentage: f64;
 
+    let timestamp = Local::now().format("%Y-%m-%d_%H:%M:%S").to_string();
+
     #[cfg(any())]
     {
         let mut detailedFile: File;
@@ -943,7 +945,6 @@ unsafe fn oram_print_stat(print_details: bool, overallFile: &mut File) {
 
     // Split the content by lines and collect them
     let mut lines1: Vec<&str> = content1.lines().collect();
-    print!("After update: {}, number of lines: {}", content1.len(), lines1.len());
 
     }
 
@@ -952,7 +953,7 @@ unsafe fn oram_print_stat(print_details: bool, overallFile: &mut File) {
 
     printdbgln!(
         1,
-        "**** Simulation done: {} %, current statistics =>
+        "**** Last updated at: {}, {} % simulation done, current statistics =>
 Read underflow count: {}({} %)
 Write failure count: {}({} %)
 Routing congestion count: {}({} %)
@@ -960,6 +961,7 @@ Global max load: {}
 Total number of removals: {}
 Total number of placements: {}({} %)
 Last placement occurred at: {}",
+        timestamp,
         simulation_percentage.ceil(),
         read_underflow_cnt,
         read_underflow_percentage,
@@ -976,7 +978,7 @@ Last placement occurred at: {}",
 
     if let Err(e) = writeln!(
         overallFile,
-        "**** Simulation done: {} %, current statistics =>
+        "**** Last updated at: {}, {} % simulation done, current statistics =>
 Read underflow count: {}({} %)
 Write failure count: {}({} %)
 Routing congestion count: {}({} %)
@@ -984,6 +986,7 @@ Global max load: {}
 Total number of removals: {}
 Total number of placements: {}({} %)
 Last placement occurred at: {}",
+        timestamp,
         simulation_percentage.ceil(),
         read_underflow_cnt,
         read_underflow_percentage,
@@ -1216,16 +1219,16 @@ unsafe fn permute(
 }
 
 unsafe fn experimental_function() {
-    let mut total_sim_steps: u64 = two.pow(27) as u64; //22 Working
-    let mut burst_cnt: u64 = 50; //two.pow(6) as u64;
-    let mut relax_cnt = 500; //u64 = two.pow() as u64;
+    let mut total_sim_steps: u64 = two.pow(20) as u64; //22 Working
+    let mut burst_cnt: u64 = 5; //two.pow(6) as u64;
+    let mut relax_cnt = 50; //u64 = two.pow() as u64;
                             /* Unexpectedly, relax_cnt = 500 gives 3% congestion, whereas relax_cnt = 50 gives 0.61%
                                The reason is, for relax_cnt = 50, there is a high read underflow
                                hence, the effective relax count becomes quite less
                             */
 
     oram_exp(
-        two.pow(11), //11 working//15 means 2^15*4KB blocks = 2^15*2^12 = 2^27 = 128MB
+        two.pow(12), //11 working//15 means 2^15*4KB blocks = 2^15*2^12 = 2^27 = 128MB
         6,
         1,
         (burst_cnt),     /* Only access few elements at the beginnig */
