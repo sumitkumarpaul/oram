@@ -16,8 +16,10 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fs;
 use std::fs::File;
-use std::io::{BufWriter, Result};
+use std::fs::OpenOptions;
 use std::io::Write;
+use std::io::{BufWriter, Result};
+use std::io::{Read, Seek, SeekFrom};
 use std::mem::MaybeUninit;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -25,12 +27,31 @@ use std::sync::Mutex;
 use std::thread;
 use tfhe::prelude::*;
 use tfhe::ClientKey;
-use std::fs::{OpenOptions};
-use std::io::{Read, Seek, SeekFrom};
+
+/* This must be initialized as macro, otherwise tree cannot be initialized statically */
+macro_rules! N {
+    () => {
+        (2 as u32).pow(12) //Temporarily it is changed to 2
+    };
+}
+
+/* Since the aim is not to take lock on entire server tree, it must be initialized once and globally */
+static g_tree: Lazy<Vec<Mutex<Bucket>>> = Lazy::new(|| {
+    let mut local_tree: Vec<Mutex<Bucket>> = vec![];
+
+    // Initialize the server buckets
+    for i in 1..=(2 * N!() - 1) {
+        // There will be 2N - 1 buckets in the tree
+        unsafe {
+            local_tree.push(Mutex::new(Bucket::new(i as u32)));
+        }
+    }
+
+    local_tree
+});
 
 // Define a global mutable list (vector) wrapped in a Mutex for thread safety
 static g_congested_buckets: Lazy<Mutex<Vec<u32>>> = Lazy::new(|| Mutex::new(vec![]));
-static g_tree: Lazy<Mutex<Vec<Bucket>>> = Lazy::new(|| Mutex::new(vec![]));
 
 macro_rules! printdbgln {
     ($dlvl:expr, $($arg:tt)*) => {
@@ -72,17 +93,18 @@ macro_rules! NOT_MOVE {
         0
     };
 }
-static mut N: u32 = 8;
+static mut N: u32 = (2 as u32).pow(12);
 static mut L: u32 = 4;
 static mut R: u32 = 1;
 static mut C: u32 = 1; /* Initial number of replicas */
 static mut Z: u32 = 8;
+static mut ITR_CNT: u64 = 1024; /* The experiment will run for this amount of time */
+
 static mut B: u32 = 4096; /* Common block size is: 4KB
                           But RLWE can encrypt 3KB per ciphertext.
                           So, block size must be set to multiple of 3KB.
                           Moreover, some place must be kept reserved for storing metadata */
 static mut epoch: u32 = 14; //2(N-1)
-static mut ITR_CNT: u64 = 1024; /* The experiment will run for this amount of time */
 static mut rate_ratio: u32 = 10; //Ratio of server's processing : Client's processing
 static mut two: u32 = 2;
 static mut tu: u64 = 0; /* Count of time unit */
@@ -253,7 +275,7 @@ impl Bucket {
         for slot in 0..Z as usize {
             if self.blocks[slot].m.x != 0 {
                 removed_item = self.blocks[slot].d;
-                self.blocks[slot].m.x = 0;//Mark the slot as empty
+                self.blocks[slot].m.x = 0; //Mark the slot as empty
                 break;
             }
         }
@@ -582,7 +604,7 @@ unsafe fn oram_exp(
     let mut overallStatFileHandle = match OpenOptions::new()
         .read(true)
         .write(true)
-        .create(true)  // Create the file if it doesn't exist
+        .create(true) // Create the file if it doesn't exist
         .open(&overall_filename)
     {
         Ok(f) => f,
@@ -590,7 +612,7 @@ unsafe fn oram_exp(
             eprintln!("Failed to create or open file: {}", e);
             return; // Exit the function if file creation fails
         }
-    };    
+    };
 
     printdbgln!(1, "ORAM experiment started at: {}", timestamp);
 
@@ -621,16 +643,10 @@ ORAM experiment parameters: N = {}, Z = {}, rate_ratio = {}, max_burst_cnt = {},
         return; // Exit the function if writing fails
     }
 
-    {
-        let mut tree = g_tree.lock().unwrap();
-        /* Loop from 1 to 2N - 1 */
-        for i in 1..=(2 * (N as usize) - 1) {
-            tree.push(Bucket::new(i as u32));
-        }
+    let mut tree = &*g_tree;
 
-        /* Initialize the ORAM with dummy data */
-        simulate_oram_init(&mut tree);
-    } /* Mutex automatically unlocked here */
+    /* Initialize the ORAM with dummy data */
+    simulate_oram_init(&mut tree);
 
     tu = 0; /* Initialize with time count 0 */
 
@@ -703,7 +719,7 @@ unsafe fn route(
     let mut node_que: VecDeque<u32> = VecDeque::new(); /* Queue of parent nodes */
     let mut process_left_edge: bool = true;
     let mut lower: u32;
-    let mut locked_steps: u32;    
+    let mut locked_steps: u32;
 
     node_que.push_front(1); /* At first push the root bucket. Located in tree[0], but has label = 1 */
 
@@ -714,7 +730,7 @@ unsafe fn route(
     while tu < ITR_CNT {
         let _ = rxFrmCsi.recv();
 
-        let mut tree = g_tree.lock().unwrap();
+        let mut tree = &*g_tree;
         locked_steps = 0;
 
         while locked_steps < rate_ratio {
@@ -729,9 +745,9 @@ unsafe fn route(
                     lower = 2 * upper + 1;
                 }
 
-                let (mut muUp, mut muDn) = calcMovement(&mut tree, upper, lower);
+                //Later this might require to update stats
+                process_edge(tree, upper, lower);
 
-                permute(&mut tree, upper, lower, &mut muUp, &mut muDn);
                 locked_steps += 1;
 
                 node_que.push_front(lower);
@@ -772,6 +788,23 @@ unsafe fn route(
     }
 }
 
+/* Process an edge of the tree where "upper" is the label of the upper bucket
+   and "lower" is the label of the lower bucket of the edge.
+*/
+unsafe fn process_edge(tree: &Vec<Mutex<Bucket>>, upper: u32, lower: u32) {
+    //printdbgln!(1, "Routing: {}<->{}", upper, lower);
+
+    //At the begining of each processing lock is taken once
+    let mut bucketUpper = tree[upper as usize - 1].lock().unwrap();
+    let mut bucketLower = tree[lower as usize - 1].lock().unwrap();
+
+    let (mut muUp, mut muDn) = calcMovement(&mut bucketUpper, &mut bucketLower, upper, lower);
+
+    permute(&mut bucketUpper, &mut bucketLower, upper, lower, &mut muUp, &mut muDn);
+
+    //At the end of the function lock on the upper and lower bucket ends
+}
+
 unsafe fn simulate_oram_access(
     mut randomness: &mut ThreadRng,
     mut r_dist: &mut Uniform<u32>,
@@ -780,7 +813,7 @@ unsafe fn simulate_oram_access(
 ) -> bool {
     let mut success: bool = false;
 
-    let mut tree = g_tree.lock().unwrap();
+    let mut tree = &*g_tree;
 
     printdbg!(0, " Access()");
 
@@ -796,7 +829,7 @@ unsafe fn simulate_oram_access(
 }
 
 unsafe fn simulate_oram_insert(
-    tree: &mut Vec<Bucket>,
+    tree: &Vec<Mutex<Bucket>>,
     mut randomness: &mut ThreadRng,
     mut x_dist: &mut Uniform<u32>,
     mut w_dist: &mut Uniform<u32>,
@@ -806,13 +839,15 @@ unsafe fn simulate_oram_insert(
     let x = randomness.sample(*x_dist);
     let w = randomness.sample(*w_dist);
 
-    if (tree[w as usize - 1].occupancy() < Z as usize) {
+    let mut bucketW = tree[w as usize - 1].lock().unwrap();
+
+    if (bucketW.occupancy() < Z as usize) {
         //Bucket with label w is stored in location (w-1)
         //Write a block having leaf label x, into the bucket(w)
-        tree[w as usize - 1].insert(x, 0, 0); //Last two parameters are dummy now
-        tree[w as usize - 1].calc_stat(); //Update statistics
-        tree[w as usize - 1].stat.w_cnt += 1;
-        tree[x as usize - 1].stat.x_cnt += 1;
+        bucketW.insert(x, 0, 0); //Last two parameters are dummy now
+        bucketW.calc_stat(); //Update statistics
+        bucketW.stat.w_cnt += 1;
+        bucketW.stat.x_cnt += 1;
         success = true;
     } else {
         /* Cannot write to the block, as it is already full */
@@ -823,7 +858,7 @@ unsafe fn simulate_oram_insert(
 }
 
 unsafe fn simulate_oram_remove(
-    tree: &mut Vec<Bucket>,
+    tree: &Vec<Mutex<Bucket>>,
     mut randomness: &mut ThreadRng,
     mut r_dist: &mut Uniform<u32>,
 ) -> bool {
@@ -832,14 +867,15 @@ unsafe fn simulate_oram_remove(
     //For experiment, randomly select a leaf node to remove.
     //Ideally, this parameter must come as an input
     let r = randomness.sample(*r_dist);
+    let mut bucket = tree[r as usize - 1].lock().unwrap();
 
     //Bucket with label r is stored in location (r-1)
     //For experimentation purpose always read the first item from the bucket
     //Ideally, the client must only remove the requested block
-    if (tree[r as usize - 1].occupancy() > 0) {
-        tree[r as usize - 1].removeNxt();
-        tree[r as usize - 1].calc_stat(); //Update statistics
-        tree[r as usize - 1].stat.r_cnt += 1;
+    if (bucket.occupancy() > 0) {
+        bucket.removeNxt();
+        bucket.calc_stat(); //Update statistics
+        bucket.stat.r_cnt += 1;
         total_num_removed += 1;
     } else {
         read_underflow_cnt += 1; //In real scenario, this will not happen unless the server misbehaves. Because, the client will not issue read in that case.
@@ -849,13 +885,16 @@ unsafe fn simulate_oram_remove(
     return success;
 }
 
-unsafe fn simulate_oram_init(tree: &mut Vec<Bucket>) {
+unsafe fn simulate_oram_init(tree: &Vec<Mutex<Bucket>>) {
     for x in two.pow(L - 1)..=(two.pow(L) - 1) {
-        /* Insert C number of replicas, in each replica the same address is specified */
-        for i in 0..C {
-            tree[x as usize - 1].insert(x, 0, 0); /* Last two parameters are dummy now */
-        }
-        tree[x as usize - 1].calc_stat();
+        {
+            let mut bucket = tree[x as usize - 1].lock().unwrap();
+            /* Insert C number of replicas, in each replica the same address is specified */
+            for i in 0..C {
+                bucket.insert(x, 0, 0); /* Last two parameters are dummy now */
+            }
+            bucket.calc_stat();
+        } //Mutex guard for each bucket ends here
     }
 }
 
@@ -900,10 +939,11 @@ unsafe fn oram_print_stat(print_details: bool, overallFile: &mut File) {
 
     write_failure_percentage =
         ((write_failure_cnt * 100) as f64 / (write_failure_cnt + total_num_removed) as f64);
-    routing_congestion_percentage = ((routing_congestion_cnt * 100) as f64 / (tu+1) as f64);
+    routing_congestion_percentage = ((routing_congestion_cnt * 100) as f64 / (tu + 1) as f64);
 
-    simulation_percentage = (((tu+1) * 100) as f64 / ITR_CNT as f64);
-    read_underflow_percentage = (((read_underflow_cnt) * 100) as f64 / (read_underflow_cnt + total_num_removed) as f64);
+    simulation_percentage = (((tu + 1) * 100) as f64 / ITR_CNT as f64);
+    read_underflow_percentage =
+        (((read_underflow_cnt) * 100) as f64 / (read_underflow_cnt + total_num_removed) as f64);
     placement_percentage = (((total_num_placed) * 100) as f64 / total_num_removed as f64);
 
     if clrOld {
@@ -916,36 +956,35 @@ unsafe fn oram_print_stat(print_details: bool, overallFile: &mut File) {
         // Flush stdout to apply changes
         std::io::stdout().flush().unwrap();
 
-    // Read the entire file into a string
-    let mut content = String::new();
-    // Move the cursor back to the begining of the file
-    overallFile.seek(SeekFrom::Start(0));
-    overallFile.read_to_string(&mut content);
+        // Read the entire file into a string
+        let mut content = String::new();
+        // Move the cursor back to the begining of the file
+        overallFile.seek(SeekFrom::Start(0));
+        overallFile.read_to_string(&mut content);
 
-    // Split the content by lines and collect them
-    let mut lines: Vec<&str> = content.lines().collect();
+        // Split the content by lines and collect them
+        let mut lines: Vec<&str> = content.lines().collect();
 
-    // Remove the last n lines
-    lines.truncate(lines.len() - 8);
+        // Remove the last n lines
+        lines.truncate(lines.len() - 8);
 
-    // Join the remaining lines back together
-    let new_content = lines.join("\n")+"\n";
+        // Join the remaining lines back together
+        let new_content = lines.join("\n") + "\n";
 
-    // Truncate the file and write the new content
-    overallFile.set_len(0);  // Clear the file
-    overallFile.seek(SeekFrom::Start(0));  // Move the cursor to the start
-    overallFile.write_all(new_content.as_bytes());
-    overallFile.flush();
+        // Truncate the file and write the new content
+        overallFile.set_len(0); // Clear the file
+        overallFile.seek(SeekFrom::Start(0)); // Move the cursor to the start
+        overallFile.write_all(new_content.as_bytes());
+        overallFile.flush();
 
-    // Read the entire file into a string
-    let mut content1 = String::new();
-    // Move the cursor back to the begining of the file
-    overallFile.seek(SeekFrom::Start(0));
-    overallFile.read_to_string(&mut content1);
+        // Read the entire file into a string
+        let mut content1 = String::new();
+        // Move the cursor back to the begining of the file
+        overallFile.seek(SeekFrom::Start(0));
+        overallFile.read_to_string(&mut content1);
 
-    // Split the content by lines and collect them
-    let mut lines1: Vec<&str> = content1.lines().collect();
-
+        // Split the content by lines and collect them
+        let mut lines1: Vec<&str> = content1.lines().collect();
     }
 
     /* From the second time onwards, it will be set */
@@ -1005,87 +1044,49 @@ Last placement occurred at: {}",
     }
 }
 
-unsafe fn calcMovement(tree: &mut Vec<Bucket>, upper: u32, lower: u32) -> (Vec<i32>, Vec<i32>) {
+unsafe fn calcMovement(
+    bucketUpper: &mut Bucket,
+    bucketLower: &mut Bucket,
+    upper: u32,
+    lower: u32,
+) -> (Vec<i32>, Vec<i32>) {
     let mut l_upper: u32 = ((upper as f64).log2() as u32) + 1;
     let mut l_lower: u32 = l_upper + 1;
 
-    #[cfg(all())]
-    {
-        let mut muUp = Vec::new();
-        let mut muDn = Vec::new();
-        /* First upper bucket */
-        for i in 0..Z {
-            if tree[upper as usize - 1].blocks[i as usize].m.x == 0 {
-                muUp.push(EMPTY!());
+    let mut muUp = Vec::new();
+    let mut muDn = Vec::new();
+    /* First upper bucket */
+    for i in 0..Z {
+        if bucketUpper.blocks[i as usize].m.x == 0 {
+            muUp.push(EMPTY!());
+        } else {
+            if (lower == (bucketUpper.blocks[i as usize].m.x >> (L - l_lower))) {
+                muUp.push(MOVE!());
             } else {
-                if (lower == (tree[upper as usize - 1].blocks[i as usize].m.x >> (L - l_lower))) {
-                    muUp.push(MOVE!());
-                } else {
-                    muUp.push(NOT_MOVE!());
-                }
+                muUp.push(NOT_MOVE!());
             }
         }
-        /* Then check the lower bucket */
-        for i in 0..Z {
-            if tree[lower as usize - 1].blocks[i as usize].m.x == 0 {
-                muDn.push(EMPTY!());
+    }
+    /* Then check the lower bucket */
+    for i in 0..Z {
+        if bucketLower.blocks[i as usize].m.x == 0 {
+            muDn.push(EMPTY!());
+        } else {
+            if (lower == (bucketLower.blocks[i as usize].m.x >> (L - l_lower))) {
+                muDn.push(NOT_MOVE!());
             } else {
-                if (lower == (tree[lower as usize - 1].blocks[i as usize].m.x >> (L - l_lower))) {
-                    muDn.push(NOT_MOVE!());
-                } else {
-                    muDn.push(MOVE!());
-                }
+                muDn.push(MOVE!());
             }
         }
-
-        (muUp, muDn)
     }
 
-    #[cfg(any())]{
-    /* CPU level parrallelism is used to enhance the simulation speed */
-    /* At first analyze the upper bucket */
-    let muUp: Vec<_> = (0..Z)
-        .into_par_iter()
-        .map(|i| {
-            let block = &tree[upper as usize - 1].blocks[i as usize];
-
-            if block.m.x == 0 {
-                EMPTY!() // Push EMPTY
-            } else {
-                if lower == (block.m.x >> (L - l_lower)) {
-                    MOVE!() // Push MOVE
-                } else {
-                    NOT_MOVE!() // Push NOT_MOVE
-                }
-            }
-        })
-        .collect(); // Collect all results into a vector
-
-    /* Then analyze the lower bucket */
-    let muDn: Vec<_> = (0..Z)
-        .into_par_iter()
-        .map(|i| {
-            let block = &tree[lower as usize - 1].blocks[i as usize];
-
-            if block.m.x == 0 {
-                EMPTY!() // Push EMPTY
-            } else {
-                if lower == (block.m.x >> (L - l_lower)) {
-                    NOT_MOVE!() // Push NOT_MOVE
-                } else {
-                    MOVE!() // Push MOVE
-                }
-            }
-        })
-        .collect(); // Collect all results into a vector
-    
-        (muUp, muDn)
-    }
+    (muUp, muDn)
 }
 
 /* Inspired from the movement algorithm in sumit_draft.docx not according to the paper */
 unsafe fn permute(
-    tree: &mut Vec<Bucket>,
+    bucketUpper: &mut Bucket,
+    bucketLower: &mut Bucket,
     upper: u32,
     lower: u32,
     muUp: &mut Vec<i32>,
@@ -1094,30 +1095,28 @@ unsafe fn permute(
     let mut l_lower: u32 = ((lower as f64).log2() as u32) + 1;
     let mut congestion: bool = false;
 
-    //printdbgln!(1, "Routing: {}<->{}", upper, lower);
-
     /* First swap */
     for i in 0..Z as usize {
         for j in 0..Z as usize {
             if (muUp[i] == MOVE!()) && (muDn[j] == MOVE!()) {
-                let tmp: blk = tree[upper as usize - 1].blocks[i].clone();
-                tree[upper as usize - 1].blocks[i].m.x = tree[lower as usize - 1].blocks[j].m.x;
-                tree[lower as usize - 1].blocks[j] = tmp;
+                let tmp: blk = bucketUpper.blocks[i].clone();
+                bucketUpper.blocks[i].m.x = bucketLower.blocks[j].m.x;
+                bucketLower.blocks[j] = tmp;
                 muUp[i] = NOT_MOVE!();
                 muDn[j] = NOT_MOVE!();
 
                 /* Track movements of the lower bucket */
-                tree[lower as usize - 1].stat.in_up_cnt += 1; //One block came from upper bucket and one went to upper
-                tree[lower as usize - 1].stat.out_up_cnt += 1; //One block went to the upper bucket
+                bucketLower.stat.in_up_cnt += 1; //One block came from upper bucket and one went to upper
+                bucketLower.stat.out_up_cnt += 1; //One block went to the upper bucket
 
                 /* Track movements of the upper bucket */
                 if lower % 2 == 0 {
                     /* Lower bucket is a left child */
-                    tree[upper as usize - 1].stat.in_lft_cnt += 1; //One block came from left child
-                    tree[upper as usize - 1].stat.out_lft_cnt += 1; //One block went to the left child
+                    bucketUpper.stat.in_lft_cnt += 1; //One block came from left child
+                    bucketUpper.stat.out_lft_cnt += 1; //One block went to the left child
                 } else {
-                    tree[upper as usize - 1].stat.in_rgt_cnt += 1; //One block came from right child
-                    tree[upper as usize - 1].stat.out_rgt_cnt += 1; //One block went to the right child
+                    bucketUpper.stat.in_rgt_cnt += 1; //One block came from right child
+                    bucketUpper.stat.out_rgt_cnt += 1; //One block went to the right child
                 }
                 /*
                  Swapping cannot happen for leaf nodes,
@@ -1132,20 +1131,20 @@ unsafe fn permute(
     for i in 0..Z as usize {
         for j in 0..Z as usize {
             if (muUp[j] == EMPTY!()) && (muDn[i] == MOVE!()) {
-                tree[upper as usize - 1].blocks[j].m.x = tree[lower as usize - 1].blocks[i].m.x;
-                tree[lower as usize - 1].blocks[i].m.x = 0;
+                bucketUpper.blocks[j].m.x = bucketLower.blocks[i].m.x;
+                bucketLower.blocks[i].m.x = 0;
                 muUp[j] = NOT_MOVE!();
                 muDn[i] = EMPTY!();
 
                 /* Track movements of the lower bucket */
-                tree[lower as usize - 1].stat.out_up_cnt += 1; //One block went to the upper bucket
+                bucketLower.stat.out_up_cnt += 1; //One block went to the upper bucket
 
                 /* Track movements of the upper bucket */
                 if lower % 2 == 0 {
                     /* Lower bucket is a left child */
-                    tree[upper as usize - 1].stat.in_lft_cnt += 1; //One block came from left child
+                    bucketUpper.stat.in_lft_cnt += 1; //One block came from left child
                 } else {
-                    tree[upper as usize - 1].stat.in_rgt_cnt += 1; //One block came from right child
+                    bucketUpper.stat.in_rgt_cnt += 1; //One block came from right child
                 }
                 /* No block can be moved to the leaf,
                 during the upward movement */
@@ -1157,25 +1156,25 @@ unsafe fn permute(
     for i in 0..Z as usize {
         for j in 0..Z as usize {
             if (muUp[i] == MOVE!()) && (muDn[j] == EMPTY!()) {
-                tree[lower as usize - 1].blocks[j].m.x = tree[upper as usize - 1].blocks[i].m.x;
-                tree[upper as usize - 1].blocks[i].m.x = 0;
+                bucketLower.blocks[j].m.x = bucketUpper.blocks[i].m.x;
+                bucketUpper.blocks[i].m.x = 0;
                 muUp[i] = EMPTY!();
                 muDn[j] = NOT_MOVE!();
 
                 /* Track movements of the lower bucket */
-                tree[lower as usize - 1].stat.in_up_cnt += 1; //One block came from the upper bucket
+                bucketLower.stat.in_up_cnt += 1; //One block came from the upper bucket
 
                 /* Track movements of the upper bucket */
                 if lower % 2 == 0 {
                     /* Lower bucket is a left child */
-                    tree[upper as usize - 1].stat.out_lft_cnt += 1; //One block went to the left child
+                    bucketUpper.stat.out_lft_cnt += 1; //One block went to the left child
                 } else {
-                    tree[upper as usize - 1].stat.out_rgt_cnt += 1; //One block went to the right child
+                    bucketUpper.stat.out_rgt_cnt += 1; //One block went to the right child
                 }
 
                 /* Means routing process is able to return back
                 one block to its destined leaf bucket */
-                if (tree[lower as usize - 1].blocks[j].m.x == lower) {
+                if (bucketLower.blocks[j].m.x == lower) {
                     total_num_placed += 1;
                     last_placement_tu = tu;
                 }
@@ -1184,8 +1183,8 @@ unsafe fn permute(
     }
 
     /* Update block statistics */
-    tree[lower as usize - 1].calc_stat();
-    tree[upper as usize - 1].calc_stat();
+    bucketLower.calc_stat();
+    bucketUpper.calc_stat();
 
     /* After performing permutation, check congestion */
     for i in 0..Z as usize {
@@ -1228,7 +1227,7 @@ unsafe fn experimental_function() {
                             */
 
     oram_exp(
-        two.pow(12), //11 working//15 means 2^15*4KB blocks = 2^15*2^12 = 2^27 = 128MB
+        N!(), //11 working//15 means 2^15*4KB blocks = 2^15*2^12 = 2^27 = 128MB
         6,
         1,
         (burst_cnt),     /* Only access few elements at the beginnig */
