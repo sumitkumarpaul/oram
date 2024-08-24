@@ -7,6 +7,7 @@ use tfhe::{
 };
 extern crate chrono;
 use chrono::Local;
+use core::num;
 use once_cell::sync::Lazy;
 use rand::distributions::{Distribution, Uniform};
 use rand::rngs::ThreadRng;
@@ -28,10 +29,17 @@ use std::thread;
 use tfhe::prelude::*;
 use tfhe::ClientKey;
 
+/* Number of CPU cores */
+macro_rules! NumCPUCores {
+    () => {
+        2048
+    };
+}
+
 /* This must be initialized as macro, otherwise tree cannot be initialized statically */
 macro_rules! N {
     () => {
-        (2 as u32).pow(12) //Temporarily it is changed to 2
+        (2 as u32).pow(12) //2^12
     };
 }
 
@@ -116,6 +124,9 @@ static mut routing_congestion_percentage: f64 = 0.0; /* The percentage of conges
 static mut num_congestion_blocks: u64 = 0; /* The number of blocks affected due to congestion */
 static mut max_burst_cnt: u64 = 0; /* The number of blocks the client retrives in a burst */
 static mut min_relax_cnt: u64 = 0; /* The amount of time (in terms of step processing), the client relaxes after each burst */
+static mut since_access: u64 = 0; /* How many edges are processed since last signaling the CSI thread */
+static mut since_print: u64 = 0; /* How many edges are processed since last status printed */
+static mut status_print_freq: u64 = 0; /* After how many edge processing the status must be printed */
 static mut global_max_bucket_load: u32 = 0; /* Maximum load occurred in any bucket */
 static mut total_num_removed: u64 = 0; /* Total number of blocks removed from its leaf location */
 static mut total_num_placed: u64 = 0; /* How many number of blocks are returned to place by the routing process */
@@ -652,16 +663,15 @@ ORAM experiment parameters: N = {}, Z = {}, rate_ratio = {}, max_burst_cnt = {},
 
     /* For synchronization between two threads */
     let (txFrmRoute, rxFrmRoute): (mpsc::Sender<bool>, mpsc::Receiver<bool>) = mpsc::channel();
-    let (txFrmCsi, rxFrmCsi): (mpsc::Sender<bool>, mpsc::Receiver<bool>) = mpsc::channel();
 
     // Spawn a new thread to run `clinet_server_interaction()`
     let csi_thread_handle = thread::spawn(|| {
-        clinet_server_interaction(txFrmCsi, rxFrmRoute);
+        clinet_server_interaction(rxFrmRoute);
     });
 
     // Spawn a new thread to run `route()`
     let route_thread_handle = thread::spawn(move || {
-        route(txFrmRoute, rxFrmCsi, &mut overallStatFileHandle);
+        route(txFrmRoute, &mut overallStatFileHandle);
     });
 
     // Wait for the spawned threads to finish
@@ -675,12 +685,7 @@ ORAM experiment parameters: N = {}, Z = {}, rate_ratio = {}, max_burst_cnt = {},
     );
 }
 
-unsafe fn clinet_server_interaction(
-    txFrmCsi: mpsc::Sender<bool>,
-    rxFrmRoute: mpsc::Receiver<bool>,
-) {
-    let mut cur_burst_cnt = 0;
-    let mut relax_cnt = 0;
+unsafe fn clinet_server_interaction(rxFrmRoute: mpsc::Receiver<bool>) {
     //Initialize the randomness
     let mut randomness = rand::thread_rng();
     let mut r_dist = Uniform::new_inclusive(two.pow(L - 1), (two.pow(L) - 1));
@@ -689,110 +694,161 @@ unsafe fn clinet_server_interaction(
 
     /* Do the experiment until a specified time */
     while tu < ITR_CNT {
+        /* Wait for signal from the route thread */
         let _ = rxFrmRoute.recv();
-        if (cur_burst_cnt < max_burst_cnt) {
+
+        let mut cur_burst_cnt = 0;
+
+        /* After getting chance, call access(), max_burst_cnt-number of times  */
+        while (cur_burst_cnt < max_burst_cnt) {
             simulate_oram_access(&mut randomness, &mut r_dist, &mut w_dist, &mut x_dist);
 
             cur_burst_cnt += 1;
-        } else {
-            if (relax_cnt < min_relax_cnt) {
-                relax_cnt = (relax_cnt + 1) % min_relax_cnt;
-
-                if (relax_cnt == 0) {
-                    cur_burst_cnt = 0;
-                }
-            }
         }
-
-        /* After doing access, disabling it
-          Again it will be enabled from route()
-        */
-        txFrmCsi.send(true);
     }
 }
 
-unsafe fn route(
-    txFrmRoute: mpsc::Sender<bool>,
-    rxFrmCsi: mpsc::Receiver<bool>,
-    overallStatFileHandle: &mut File,
-) {
-    let mut node_que: VecDeque<u32> = VecDeque::new(); /* Queue of parent nodes */
-    let mut process_left_edge: bool = true;
-    let mut lower: u32;
-    let mut locked_steps: u32;
-
-    node_que.push_front(1); /* At first push the root bucket. Located in tree[0], but has label = 1 */
-
+unsafe fn route(txFrmRoute: mpsc::Sender<bool>, overallStatFileHandle: &mut File) {
     //CSI thread is waiting, so at the beginning send a dummy start message to the CSI thread
     txFrmRoute.send(true);
+    let mut cur_lvl: u32 = 1; //Start with processing level 1
+    let mut edges: Vec<(u32, u32)> = Vec::new();
 
-    /* Run the thread until the specified time */
-    while tu < ITR_CNT {
-        let _ = rxFrmCsi.recv();
-
-        let mut tree = &*g_tree;
-        locked_steps = 0;
-
-        while locked_steps < rate_ratio {
-            printdbgln!(0, "tu: {} Route()", tu + locked_steps as u64);
-
-            /* During each step, two different edges are processed */
-            if let Some(upper) = node_que.pop_back() {
-                if process_left_edge {
-                    lower = 2 * upper;
-                    node_que.push_back(upper); /* As left edge is being processed, it will again come as upper node */
-                } else {
-                    lower = 2 * upper + 1;
-                }
-
-                //Later this might require to update stats
-                process_edge(tree, upper, lower);
-
-                locked_steps += 1;
-
-                node_que.push_front(lower);
-            } else {
-                printdbgln!(1, "Queue is empty, should not come here..!!");
-            }
-
-            /* Re-initialize the queue */
-            if ((tu + locked_steps as u64) % (epoch as u64)) == 0 {
-                //epoch is global variable
-                node_que.clear();
-                node_que.push_front(1);
-            }
-
-            /* Print the partial statistics */
-            if (tu + locked_steps as u64 + 1) % (ITR_CNT / 10) == 0 {
-                oram_print_stat(false, overallStatFileHandle);
-            }
-
-            /*
-              If current iteration processes left edge,
-              then the next iteration will process the right edge and vice-versa.
-            */
-            process_left_edge = !process_left_edge;
-        }
-
-        /* As inner loop executed for rate_ratio steps, increament tu accordingly */
-        tu += rate_ratio as u64;
-
+    /* Exit condition is checked within the loop */
+    while true {
+        printdbgln!(0, "tu: {} Route()", tu as u64);
         /*
-          Mutex automatically unlocked here.
-          So, before the next starting of the inner loop
-          access() gets a chance to execute.
+          Process edges level by level (level of the upper node).
+          At level l, there will be 2^(l-1) nodes, so 2^(l-1) left edges
+          and 2^(l-1) right edges.
+          For each level first taget to finish all 2^(l-1) left edges,
+          which are independent hence CPU level parallelism can be used
+          to speed up the simulation.
+          Then target the right edges.
+          And finishing one level completely, jump to the next level
         */
 
-        /* Enable the client server to process access() */
-        txFrmRoute.send(true);
+        /* First process the left edges */
+        for label in two.pow(cur_lvl - 1)..two.pow(cur_lvl) {
+            if edges.len() < NumCPUCores!() {
+                edges.push((label, (2 * label))); //Left edge
+            } else {
+                //Process routing in parallel
+                let mut do_break =
+                    process_pending_edges(&mut edges, &txFrmRoute, overallStatFileHandle);
+
+                if do_break {
+                    break;
+                }
+
+                edges.push((label, (2 * label)));
+            }
+        }
+        /*
+          After execution of the previous loop
+          some (2^(l-1)%NumCPUCores!()) will be pending
+          process them here and clear the edge queue here
+        */
+        let mut do_break = process_pending_edges(&mut edges, &txFrmRoute, overallStatFileHandle);
+
+        if do_break {
+            break;
+        }
+
+        /* Then process the right edges */
+        for label in two.pow(cur_lvl - 1)..two.pow(cur_lvl) {
+            if edges.len() < NumCPUCores!() {
+                edges.push((label, ((2 * label) + 1)));
+            } else {
+                //Process routing in parallel
+                let mut do_break =
+                    process_pending_edges(&mut edges, &txFrmRoute, overallStatFileHandle);
+
+                if do_break {
+                    break;
+                }
+
+                edges.push((label, ((2 * label) + 1))); //Right edge
+            }
+        }
+        /*
+          After execution of the previous loop
+          some (2^(l-1)%NumCPUCores!()) will be pending
+          process them here and clear the edge queue here
+        */
+        let mut do_break = process_pending_edges(&mut edges, &txFrmRoute, overallStatFileHandle);
+
+        if do_break {
+            break;
+        }
+
+        cur_lvl += 1;
+
+        if cur_lvl == L {
+            //Start again from the beginning
+            cur_lvl = 1;
+        }
     }
+
+    oram_print_stat(false, overallStatFileHandle);
+}
+
+unsafe fn process_pending_edges(
+    edges: &mut Vec<(u32, u32)>,
+    txFrmRoute: &mpsc::Sender<bool>,
+    overallFile: &mut File,
+) -> bool {
+    let mut do_break = false;
+    let mut num_edge_processed = edges.len() as u64;
+    printdbgln!(
+        0,
+        "tu: {}, Processing: {:?}, num_edge_processed = {}",
+        tu,
+        edges,
+        num_edge_processed
+    );
+
+    //Process routing in parallel
+    edges.par_iter().for_each(|(upper, lower)| {
+        process_edge(*upper, *lower);
+    });
+    tu += num_edge_processed;
+    since_access += num_edge_processed;
+    since_print += num_edge_processed;
+
+    /* Print the partial statistics */
+    if since_print >= status_print_freq {
+        oram_print_stat(false, overallFile);
+        since_print = 0;
+    }
+
+    if tu > ITR_CNT {
+        do_break = true;
+    }
+
+    if since_access >= (max_burst_cnt + min_relax_cnt) {
+        /* Enable the CSI thread to process access() */
+        printdbgln!(
+            0,
+            "Sending access signal at since: {}, at tu: {}",
+            since_access,
+            tu
+        );
+        txFrmRoute.send(true);
+        since_access = 0;
+    }
+
+    //Clear the edge queue
+    edges.clear();
+
+    return do_break;
 }
 
 /* Process an edge of the tree where "upper" is the label of the upper bucket
    and "lower" is the label of the lower bucket of the edge.
 */
-unsafe fn process_edge(tree: &Vec<Mutex<Bucket>>, upper: u32, lower: u32) {
-    //printdbgln!(1, "Routing: {}<->{}", upper, lower);
+unsafe fn process_edge(upper: u32, lower: u32) {
+    let mut tree = &*g_tree;
 
     //At the begining of each processing lock is taken once
     let mut bucketUpper = tree[upper as usize - 1].lock().unwrap();
@@ -800,7 +856,14 @@ unsafe fn process_edge(tree: &Vec<Mutex<Bucket>>, upper: u32, lower: u32) {
 
     let (mut muUp, mut muDn) = calcMovement(&mut bucketUpper, &mut bucketLower, upper, lower);
 
-    permute(&mut bucketUpper, &mut bucketLower, upper, lower, &mut muUp, &mut muDn);
+    permute(
+        &mut bucketUpper,
+        &mut bucketLower,
+        upper,
+        lower,
+        &mut muUp,
+        &mut muDn,
+    );
 
     //At the end of the function lock on the upper and lower bucket ends
 }
@@ -1188,16 +1251,16 @@ unsafe fn permute(
 
     /* After performing permutation, check congestion */
     for i in 0..Z as usize {
-        let mut congested_buckets = g_congested_buckets.lock().unwrap();
+        //let mut congested_buckets = g_congested_buckets.lock().unwrap();
         /* Ideally there should not be any movable block in either bucket */
         if (muUp[i] == MOVE!()) {
-            num_congestion_blocks += 1;
+            num_congestion_blocks += 1; //This is to be done within lock
 
             /*
             Still some blocks in the upper bucket remains unmoved
               Means, the lower bucket is full and congested
             */
-            congested_buckets.push(lower);
+            //congested_buckets.push(lower);
             congestion = true;
         }
         if (muDn[i] == MOVE!()) {
@@ -1207,24 +1270,25 @@ unsafe fn permute(
             Still some blocks in the lower bucket remains unmoved
               Means, the upper bucket is full and congested
             */
-            congested_buckets.push(upper);
+            //congested_buckets.push(upper);
             congestion = true;
         }
     }
 
     if congestion {
-        routing_congestion_cnt += 1;
+        routing_congestion_cnt += 1; //This is to be done within lock
     }
 }
 
 unsafe fn experimental_function() {
-    let mut total_sim_steps: u64 = two.pow(20) as u64; //22 Working
+    let mut total_sim_steps: u64 = two.pow(30) as u64; //22 Working
     let mut burst_cnt: u64 = 5; //two.pow(6) as u64;
     let mut relax_cnt = 50; //u64 = two.pow() as u64;
                             /* Unexpectedly, relax_cnt = 500 gives 3% congestion, whereas relax_cnt = 50 gives 0.61%
                                The reason is, for relax_cnt = 50, there is a high read underflow
                                hence, the effective relax count becomes quite less
                             */
+    status_print_freq = total_sim_steps / 10;
 
     oram_exp(
         N!(), //11 working//15 means 2^15*4KB blocks = 2^15*2^12 = 2^27 = 128MB
