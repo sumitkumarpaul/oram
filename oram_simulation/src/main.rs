@@ -39,7 +39,7 @@ macro_rules! NumCPUCores {
 /* This must be initialized as macro, otherwise tree cannot be initialized statically */
 macro_rules! N {
     () => {
-        (2 as u32).pow(12) //2^12
+        (2 as u64).pow(20) //2^12
     };
 }
 
@@ -51,7 +51,7 @@ static g_tree: Lazy<Vec<Mutex<Bucket>>> = Lazy::new(|| {
     for i in 1..=(2 * N!() - 1) {
         // There will be 2N - 1 buckets in the tree
         unsafe {
-            local_tree.push(Mutex::new(Bucket::new(i as u32)));
+            local_tree.push(Mutex::new(Bucket::new(i as u64)));
         }
     }
 
@@ -59,7 +59,7 @@ static g_tree: Lazy<Vec<Mutex<Bucket>>> = Lazy::new(|| {
 });
 
 // Define a global mutable list (vector) wrapped in a Mutex for thread safety
-static g_congested_buckets: Lazy<Mutex<Vec<u32>>> = Lazy::new(|| Mutex::new(vec![]));
+static g_congested_buckets: Lazy<Mutex<Vec<u64>>> = Lazy::new(|| Mutex::new(vec![]));
 
 macro_rules! printdbgln {
     ($dlvl:expr, $($arg:tt)*) => {
@@ -101,20 +101,20 @@ macro_rules! NOT_MOVE {
         0
     };
 }
-static mut N: u32 = (2 as u32).pow(12);
-static mut L: u32 = 4;
-static mut R: u32 = 1;
-static mut C: u32 = 1; /* Initial number of replicas */
-static mut Z: u32 = 8;
+static mut N: u64 = (2 as u64).pow(12);
+static mut L: u64 = 4;
+static mut R: u64 = 1;
+static mut C: u64 = 1; /* Initial number of replicas */
+static mut Z: u64 = 8;
 static mut ITR_CNT: u64 = 1024; /* The experiment will run for this amount of time */
 
-static mut B: u32 = 4096; /* Common block size is: 4KB
+static mut B: u64 = 4096; /* Common block size is: 4KB
                           But RLWE can encrypt 3KB per ciphertext.
                           So, block size must be set to multiple of 3KB.
                           Moreover, some place must be kept reserved for storing metadata */
-static mut epoch: u32 = 14; //2(N-1)
-static mut rate_ratio: u32 = 10; //Ratio of server's processing : Client's processing
-static mut two: u32 = 2;
+static mut epoch: u64 = 14; //2(N-1)
+static mut rate_ratio: u64 = 10; //Ratio of server's processing : Client's processing
+static mut two: u64 = 2;
 static mut tu: u64 = 0; /* Count of time unit */
 static mut read_underflow_cnt: u64 = 0; /* The number of times the read operation failed */
 static mut write_failure_cnt: u64 = 0; /* The number of times the write operation failed */
@@ -127,7 +127,7 @@ static mut min_relax_cnt: u64 = 0; /* The amount of time (in terms of step proce
 static mut since_access: u64 = 0; /* How many edges are processed since last signaling the CSI thread */
 static mut since_print: u64 = 0; /* How many edges are processed since last status printed */
 static mut status_print_freq: u64 = 0; /* After how many edge processing the status must be printed */
-static mut global_max_bucket_load: u32 = 0; /* Maximum load occurred in any bucket */
+static mut global_max_bucket_load: u64 = 0; /* Maximum load occurred in any bucket */
 static mut total_num_removed: u64 = 0; /* Total number of blocks removed from its leaf location */
 static mut total_num_placed: u64 = 0; /* How many number of blocks are returned to place by the routing process */
 static mut last_placement_tu: u64 = 0; /* When the last block is placed to its destined leaf */
@@ -135,18 +135,18 @@ static mut clrOld: bool = false; /* Clear previous prints */
 
 #[derive(Debug)]
 struct m {
-    a: u32,
-    x: u32,
+    a: u64,
+    x: u64,
 }
 #[derive(Debug)]
 struct blk {
     m: m,
     //d: Vec<FheUint<FheUint1024Id>>,
-    d: u32,
+    d: u64,
 }
 
 struct Bucket {
-    b: u32,           //The label of this bucket
+    b: u64,           //The label of this bucket
     blocks: Vec<blk>, //List holding the leaf identifiers of the blocks
     stat: Stat,
 }
@@ -164,7 +164,7 @@ struct Stat {
     in_lft_cnt: u64,
     in_rgt_cnt: u64,
     sty_cnt: u64,
-    max: u32,
+    max: u64,
     avg: f64,
     var: f64,    //Variance of occupancy
     sq_avg: f64, //Average of the square of the occupancy, required for calculating the variance
@@ -184,11 +184,11 @@ impl Clone for blk {
 
 impl blk {
     // Method to create a new Bucket
-    fn new(id: u32, lf: u32) -> Self {
+    fn new(id: u64, lf: u64) -> Self {
         blk {
             m: m { a: 0, x: 0 },
             //d: Vec::new(),
-            d: 0 as u32,
+            d: 0 as u64,
         }
     }
 
@@ -221,7 +221,7 @@ impl blk {
 
 impl Bucket {
     // Method to create a new Bucket
-    unsafe fn new(label: u32) -> Self {
+    unsafe fn new(label: u64) -> Self {
         Bucket {
             b: label,
             stat: Stat {
@@ -245,8 +245,8 @@ impl Bucket {
         }
     }
 
-    // Method to add a u32(which contains the metadata m.x) in the place of 0
-    unsafe fn insert(&mut self, x: u32, a: u32, d: u32) -> bool {
+    // Method to add a u64(which contains the metadata m.x) in the place of 0
+    unsafe fn insert(&mut self, x: u64, a: u64, d: u64) -> bool {
         let mut success: bool = false;
 
         if self.occupancy() < Z as usize {
@@ -280,8 +280,8 @@ impl Bucket {
     }
 
     // Method to remove an item from non-empty slot of the bucket
-    unsafe fn removeNxt(&mut self) -> u32 {
-        let mut removed_item: u32 = 0;
+    unsafe fn removeNxt(&mut self) -> u64 {
+        let mut removed_item: u64 = 0;
 
         for slot in 0..Z as usize {
             if self.blocks[slot].m.x != 0 {
@@ -295,8 +295,8 @@ impl Bucket {
     }
 
     // Method to remove an item from the stated index and insert 0 in that place
-    fn remove(&mut self, index: usize) -> u32 {
-        let mut removed_item: u32 = self.blocks[index].d;
+    fn remove(&mut self, index: usize) -> u64 {
+        let mut removed_item: u64 = self.blocks[index].d;
         self.blocks[index].m.x = 0;
 
         return removed_item;
@@ -304,8 +304,8 @@ impl Bucket {
 
     // Method to remove an item by its value
     /*
-    fn removeVal(&mut self, value: u32) -> u32 {
-        let mut removed_item: u32 = 0;
+    fn removeVal(&mut self, value: u64) -> u64 {
+        let mut removed_item: u64 = 0;
 
         if let Some(pos) = self.blocks.iter().position(|&x| x == value) {
             removed_item = self.blocks[pos];
@@ -329,7 +329,7 @@ impl Bucket {
 
         self.stat.access_cnt += 1;
 
-        let mut current: u32 = self.occupancy() as u32;
+        let mut current: u64 = self.occupancy() as u64;
         total += current as u64;
         sq_total += current.pow(2) as u64;
 
@@ -435,18 +435,18 @@ fn main() {
 
     //let mut block = blk { m: M, d: [5, 5] };
 
-    let mut Tcur: u32;
-    let mut x: u32;
-    let mut w: u32;
+    let mut Tcur: u64;
+    let mut x: u64;
+    let mut w: u64;
 
     unsafe {
         Tcur = 0;
         let mut rng = rand::thread_rng();
-        x = rng.gen_range(two.pow(L - 1)..(two.pow(L) - 1));
-        w = rng.gen_range(1..(two.pow(L - R) - 1));
+        x = rng.gen_range(two.pow(L as u32 - 1)..(two.pow(L as u32) - 1));
+        w = rng.gen_range(1..(two.pow((L - R) as u32) - 1));
 
-        x = rng.gen_range(two.pow(L - 1)..(two.pow(L) - 1));
-        w = rng.gen_range(1..(two.pow(L - R) - 1));
+        x = rng.gen_range(two.pow(L as u32 - 1)..(two.pow(L as u32) - 1));
+        w = rng.gen_range(1..(two.pow((L - R) as u32) - 1));
 
         //block.m = M;
         //block.d = [5,5];
@@ -530,14 +530,15 @@ fn main() {
   It must determine, the timestamp when the current block will be
   available to the leaf bucket.
 */
-unsafe fn AvailabilityTS(Tcur: u32, x: u32, w: u32) -> u32 {
-    let mut Texp: u32;
-    let mut t: u32 = 0;
+#[cfg(predicate)]
+unsafe fn AvailabilityTS(Tcur: u64, x: u64, w: u64) -> u64 {
+    let mut Texp: u64;
+    let mut t: u64 = 0;
 
-    let mut lw: u32 = ((w as f64).log2() as u32) + 1; //Automatic floor operation due to type conversion
-    let mut ax: u32 = (x >> (L - lw));
-    let mut aw: u32 = w; //Ancestor of w, start with w
-    let mut prev_aw: u32;
+    let mut lw: u64 = ((w as f64).log2() as u64) + 1; //Automatic floor operation due to type conversion
+    let mut ax: u64 = (x >> (L - lw));
+    let mut aw: u64 = w; //Ancestor of w, start with w
+    let mut prev_aw: u64;
 
     printdbgln!(0, "level of w({}) is: {}", w, lw);
     printdbgln!(0, "Ancestor of x({}) is: {}", x, ax);
@@ -578,9 +579,9 @@ unsafe fn AvailabilityTS(Tcur: u32, x: u32, w: u32) -> u32 {
 - With the increase of N, write failure increases. N=2^15 failure 57311/50000000. N=2^10: 2960/50000000. N=2^4: 1/50000000.
 */
 unsafe fn oram_exp(
-    _N: u32,
-    _Z: u32,
-    _rate_ratio: u32,
+    _N: u64,
+    _Z: u64,
+    _rate_ratio: u64,
     _max_burst_cnt: u64,
     _min_relax_cnt: u64,
     _ITR_CNT: u64,
@@ -595,7 +596,7 @@ unsafe fn oram_exp(
     min_relax_cnt = _min_relax_cnt; //Assume it is 5 minutes and only 1 edge is processed per second (i.e., 1*2Z*4KB = 48KB/s)
 
     /* Derived parameters */
-    L = ((N as f64).log2() as u32) + 1;
+    L = ((N as f64).log2() as u64) + 1;
     epoch = 2 * (N - 1);
 
     /* Local variable */
@@ -688,9 +689,9 @@ ORAM experiment parameters: N = {}, Z = {}, rate_ratio = {}, max_burst_cnt = {},
 unsafe fn clinet_server_interaction(rxFrmRoute: mpsc::Receiver<bool>) {
     //Initialize the randomness
     let mut randomness = rand::thread_rng();
-    let mut r_dist = Uniform::new_inclusive(two.pow(L - 1), (two.pow(L) - 1));
-    let mut x_dist = Uniform::new_inclusive(two.pow(L - 1), (two.pow(L) - 1));
-    let mut w_dist = Uniform::new_inclusive(1, (two.pow(L - 1) - 1));
+    let mut r_dist = Uniform::new_inclusive(two.pow(L as u32 - 1), (two.pow(L as u32) - 1));
+    let mut x_dist = Uniform::new_inclusive(two.pow(L as u32 - 1), (two.pow(L as u32) - 1));
+    let mut w_dist = Uniform::new_inclusive(1, (two.pow(L as u32 - 1) - 1));
 
     /* Do the experiment until a specified time */
     while tu < ITR_CNT {
@@ -711,8 +712,8 @@ unsafe fn clinet_server_interaction(rxFrmRoute: mpsc::Receiver<bool>) {
 unsafe fn route(txFrmRoute: mpsc::Sender<bool>, overallStatFileHandle: &mut File) {
     //CSI thread is waiting, so at the beginning send a dummy start message to the CSI thread
     txFrmRoute.send(true);
-    let mut cur_lvl: u32 = 1; //Start with processing level 1
-    let mut edges: Vec<(u32, u32)> = Vec::new();
+    let mut cur_lvl: u64 = 1; //Start with processing level 1
+    let mut edges: Vec<(u64, u64)> = Vec::new();
 
     /* Exit condition is checked within the loop */
     while true {
@@ -729,7 +730,7 @@ unsafe fn route(txFrmRoute: mpsc::Sender<bool>, overallStatFileHandle: &mut File
         */
 
         /* First process the left edges */
-        for label in two.pow(cur_lvl - 1)..two.pow(cur_lvl) {
+        for label in two.pow(cur_lvl  as u32 - 1)..two.pow(cur_lvl  as u32) {
             if edges.len() < NumCPUCores!() {
                 edges.push((label, (2 * label))); //Left edge
             } else {
@@ -756,7 +757,7 @@ unsafe fn route(txFrmRoute: mpsc::Sender<bool>, overallStatFileHandle: &mut File
         }
 
         /* Then process the right edges */
-        for label in two.pow(cur_lvl - 1)..two.pow(cur_lvl) {
+        for label in two.pow(cur_lvl  as u32 - 1)..two.pow(cur_lvl  as u32) {
             if edges.len() < NumCPUCores!() {
                 edges.push((label, ((2 * label) + 1)));
             } else {
@@ -794,7 +795,7 @@ unsafe fn route(txFrmRoute: mpsc::Sender<bool>, overallStatFileHandle: &mut File
 }
 
 unsafe fn process_pending_edges(
-    edges: &mut Vec<(u32, u32)>,
+    edges: &mut Vec<(u64, u64)>,
     txFrmRoute: &mpsc::Sender<bool>,
     overallFile: &mut File,
 ) -> bool {
@@ -847,7 +848,7 @@ unsafe fn process_pending_edges(
 /* Process an edge of the tree where "upper" is the label of the upper bucket
    and "lower" is the label of the lower bucket of the edge.
 */
-unsafe fn process_edge(upper: u32, lower: u32) {
+unsafe fn process_edge(upper: u64, lower: u64) {
     let mut tree = &*g_tree;
 
     //At the begining of each processing lock is taken once
@@ -870,9 +871,9 @@ unsafe fn process_edge(upper: u32, lower: u32) {
 
 unsafe fn simulate_oram_access(
     mut randomness: &mut ThreadRng,
-    mut r_dist: &mut Uniform<u32>,
-    mut w_dist: &mut Uniform<u32>,
-    mut x_dist: &mut Uniform<u32>,
+    mut r_dist: &mut Uniform<u64>,
+    mut w_dist: &mut Uniform<u64>,
+    mut x_dist: &mut Uniform<u64>,
 ) -> bool {
     let mut success: bool = false;
 
@@ -894,8 +895,8 @@ unsafe fn simulate_oram_access(
 unsafe fn simulate_oram_insert(
     tree: &Vec<Mutex<Bucket>>,
     mut randomness: &mut ThreadRng,
-    mut x_dist: &mut Uniform<u32>,
-    mut w_dist: &mut Uniform<u32>,
+    mut x_dist: &mut Uniform<u64>,
+    mut w_dist: &mut Uniform<u64>,
 ) -> bool {
     let mut success: bool = false;
     //Randomly select a new leaf node and write node
@@ -923,7 +924,7 @@ unsafe fn simulate_oram_insert(
 unsafe fn simulate_oram_remove(
     tree: &Vec<Mutex<Bucket>>,
     mut randomness: &mut ThreadRng,
-    mut r_dist: &mut Uniform<u32>,
+    mut r_dist: &mut Uniform<u64>,
 ) -> bool {
     let mut success: bool = true;
 
@@ -949,7 +950,7 @@ unsafe fn simulate_oram_remove(
 }
 
 unsafe fn simulate_oram_init(tree: &Vec<Mutex<Bucket>>) {
-    for x in two.pow(L - 1)..=(two.pow(L) - 1) {
+    for x in two.pow(L as u32 - 1)..=(two.pow(L as u32) - 1) {
         {
             let mut bucket = tree[x as usize - 1].lock().unwrap();
             /* Insert C number of replicas, in each replica the same address is specified */
@@ -1110,11 +1111,11 @@ Last placement occurred at: {}",
 unsafe fn calcMovement(
     bucketUpper: &mut Bucket,
     bucketLower: &mut Bucket,
-    upper: u32,
-    lower: u32,
+    upper: u64,
+    lower: u64,
 ) -> (Vec<i32>, Vec<i32>) {
-    let mut l_upper: u32 = ((upper as f64).log2() as u32) + 1;
-    let mut l_lower: u32 = l_upper + 1;
+    let mut l_upper: u64 = ((upper as f64).log2() as u64) + 1;
+    let mut l_lower: u64 = l_upper + 1;
 
     let mut muUp = Vec::new();
     let mut muDn = Vec::new();
@@ -1150,12 +1151,12 @@ unsafe fn calcMovement(
 unsafe fn permute(
     bucketUpper: &mut Bucket,
     bucketLower: &mut Bucket,
-    upper: u32,
-    lower: u32,
+    upper: u64,
+    lower: u64,
     muUp: &mut Vec<i32>,
     muDn: &mut Vec<i32>,
 ) {
-    let mut l_lower: u32 = ((lower as f64).log2() as u32) + 1;
+    let mut l_lower: u64 = ((lower as f64).log2() as u64) + 1;
     let mut congestion: bool = false;
 
     /* First swap */
@@ -1281,7 +1282,7 @@ unsafe fn permute(
 }
 
 unsafe fn experimental_function() {
-    let mut total_sim_steps: u64 = two.pow(30) as u64; //22 Working
+    let mut total_sim_steps: u64 = two.pow(34) as u64; //22 Working
     let mut burst_cnt: u64 = 5; //two.pow(6) as u64;
     let mut relax_cnt = 50; //u64 = two.pow() as u64;
                             /* Unexpectedly, relax_cnt = 500 gives 3% congestion, whereas relax_cnt = 50 gives 0.61%
