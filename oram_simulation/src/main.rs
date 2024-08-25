@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::Mutex;
 use std::thread;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tfhe::prelude::*;
 use tfhe::ClientKey;
 
@@ -119,7 +120,8 @@ static mut tu: u64 = 0; /* Count of time unit */
 static mut read_underflow_cnt: u64 = 0; /* The number of times the read operation failed */
 static mut write_failure_cnt: u64 = 0; /* The number of times the write operation failed */
 static mut write_failure_percentage: f64 = 0.0; /* The percentage of failed write operation */
-static mut routing_congestion_cnt: u64 = 0; /* The number of times the background operation caused buffer overflow */
+//static mut routing_congestion_cnt: u64 = 0; /* The number of times the background operation caused buffer overflow */
+static routing_congestion_cnt: AtomicU64 = AtomicU64::new(0);
 static mut routing_congestion_percentage: f64 = 0.0; /* The percentage of congested steps during routing */
 static mut num_congestion_blocks: u64 = 0; /* The number of blocks affected due to congestion */
 static mut max_burst_cnt: u64 = 0; /* The number of blocks the client retrives in a burst */
@@ -643,8 +645,10 @@ ORAM experiment parameters: N = {}, Z = {}, rate_ratio = {}, max_burst_cnt = {},
 
     /* Write to the log file */
     if let Err(e) = writeln!(overallStatFileHandle, "===================================================================================================================
-ORAM experiment parameters: N = {}, Z = {}, rate_ratio = {}, max_burst_cnt = {}, min_relax_cnt = {}, ITR_CNT = {}
+ORAM experiment started at: {}
+Parameters: N = {}, Z = {}, rate_ratio = {}, max_burst_cnt = {}, min_relax_cnt = {}, ITR_CNT = {}
 ===================================================================================================================",
+    timestamp,
     N,
     Z,
     rate_ratio,
@@ -1003,7 +1007,7 @@ unsafe fn oram_print_stat(print_details: bool, overallFile: &mut File) {
 
     write_failure_percentage =
         ((write_failure_cnt * 100) as f64 / (write_failure_cnt + total_num_removed) as f64);
-    routing_congestion_percentage = ((routing_congestion_cnt * 100) as f64 / (tu + 1) as f64);
+    routing_congestion_percentage = ((routing_congestion_cnt.load(Ordering::SeqCst) * 100) as f64 / (tu + 1) as f64);
 
     simulation_percentage = (((tu + 1) * 100) as f64 / ITR_CNT as f64);
     read_underflow_percentage =
@@ -1070,7 +1074,7 @@ Last placement occurred at: {}",
         read_underflow_percentage,
         write_failure_cnt,
         write_failure_percentage,
-        routing_congestion_cnt,
+        routing_congestion_cnt.load(Ordering::SeqCst),
         routing_congestion_percentage,
         global_max_bucket_load,
         total_num_removed,
@@ -1095,7 +1099,7 @@ Last placement occurred at: {}",
         read_underflow_percentage,
         write_failure_cnt,
         write_failure_percentage,
-        routing_congestion_cnt,
+        routing_congestion_cnt.load(Ordering::SeqCst),
         routing_congestion_percentage,
         global_max_bucket_load,
         total_num_removed,
@@ -1277,19 +1281,20 @@ unsafe fn permute(
     }
 
     if congestion {
-        routing_congestion_cnt += 1; //This is to be done within lock
+        //routing_congestion_cnt += 1; //This is to be done within lock
+        routing_congestion_cnt.fetch_add(1, Ordering::SeqCst);
     }
 }
 
 unsafe fn experimental_function() {
-    let mut total_sim_steps: u64 = two.pow(34) as u64; //22 Working
+    let mut total_sim_steps: u64 = two.pow(38) as u64; //22 Working
     let mut burst_cnt: u64 = 5; //two.pow(6) as u64;
     let mut relax_cnt = 50; //u64 = two.pow() as u64;
                             /* Unexpectedly, relax_cnt = 500 gives 3% congestion, whereas relax_cnt = 50 gives 0.61%
                                The reason is, for relax_cnt = 50, there is a high read underflow
                                hence, the effective relax count becomes quite less
                             */
-    status_print_freq = total_sim_steps / 10;
+    status_print_freq = two.pow(30) as u64;
 
     oram_exp(
         N!(), //11 working//15 means 2^15*4KB blocks = 2^15*2^12 = 2^27 = 128MB
