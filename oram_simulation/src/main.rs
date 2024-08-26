@@ -18,6 +18,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
+use std::io;
 use std::io::Write;
 use std::io::{BufWriter, Result};
 use std::io::{Read, Seek, SeekFrom};
@@ -132,6 +133,7 @@ static mut total_num_removed: u64 = 0; /* Total number of blocks removed from it
 static mut total_num_placed: u64 = 0; /* How many number of blocks are returned to place by the routing process */
 static mut last_placement_tu: u64 = 0; /* When the last block is placed to its destined leaf */
 static mut clrOld: bool = false; /* Clear previous prints */
+static mut nxtRdBktLabel: u64 = 0; /* Lable of the bucket which will be read next */
 
 #[derive(Debug)]
 struct m {
@@ -691,7 +693,6 @@ Parameters: N = {}, Z = {}, rate_ratio = {}, max_burst_cnt = {}, min_relax_cnt =
 unsafe fn clinet_server_interaction(rxFrmRoute: mpsc::Receiver<u64>) {
     //Initialize the randomness
     let mut randomness = rand::thread_rng();
-    let mut r_dist = Uniform::new_inclusive(two.pow(L as u32 - 1), (two.pow(L as u32) - 1));
     let mut x_dist = Uniform::new_inclusive(two.pow(L as u32 - 1), (two.pow(L as u32) - 1));
     let mut w_dist = Uniform::new_inclusive(1, (two.pow(L as u32 - 1) - 1));
 
@@ -704,7 +705,7 @@ unsafe fn clinet_server_interaction(rxFrmRoute: mpsc::Receiver<u64>) {
 
         /* After getting chance, call access(), max_burst_cnt-number of times  */
         while (num_access < num_pending_access) {
-            simulate_oram_access(&mut randomness, &mut r_dist, &mut w_dist, &mut x_dist);
+            simulate_oram_access(&mut randomness, &mut w_dist, &mut x_dist);
 
             num_access += 1;
         }
@@ -801,7 +802,7 @@ unsafe fn process_pending_edges(
 ) -> bool {
     let mut do_break = false;
     let mut num_edge_processed = edges.len() as u64;
-    let mut num_pending_access: u64 = 0;
+    let mut num_pending_accesses: u64 = 0;
 
     printdbgln!(
         0,
@@ -812,13 +813,17 @@ unsafe fn process_pending_edges(
     );
 
     //Process routing in parallel and note down the congestion counts
-    let congestion_counts: Vec<u64> = edges
-        .par_iter()
-        .map(|(upper, lower)| process_edge(*upper, *lower))
-        .collect();
+    let (congestion_counts, placed_counts) = edges.par_iter()
+        .map(|(upper, lower)| process_edge(*upper, *lower)) // Extract the components from the tuple
+        .reduce(|| (0u64, 0u64), |(total_congestion_cnt, total_placed_cnt), (upper, lower)| {
+            (total_congestion_cnt + upper, total_placed_cnt + lower) // Sum the first and second components separately
+        });
 
     /* Update routing congestion */
-    routing_congestion_cnt += congestion_counts.iter().sum::<u64>();
+    routing_congestion_cnt += congestion_counts;
+
+    /* Update placement counts */
+    total_num_placed += placed_counts;
 
     tu += num_edge_processed;
     since_access += num_edge_processed;
@@ -834,19 +839,19 @@ unsafe fn process_pending_edges(
         do_break = true;
     }
 
-    num_pending_access = max_burst_cnt * (since_access / (max_burst_cnt + min_relax_cnt));
+    num_pending_accesses = max_burst_cnt * (since_access / (max_burst_cnt + min_relax_cnt));
 
-    if num_pending_access > 0 {
+    if num_pending_accesses > 0 {
         /* Enable the CSI thread to process access() */
         printdbgln!(
             0,
             "Sending signal for {}-access at since: {}, at tu: {}",
-            num_pending_access,
+            num_pending_accesses,
             since_access,
             tu
         );
 
-        txFrmRoute.send(num_pending_access).unwrap();
+        txFrmRoute.send(num_pending_accesses).unwrap();
         since_access = since_access % (max_burst_cnt + min_relax_cnt);
     }
 
@@ -859,7 +864,7 @@ unsafe fn process_pending_edges(
 /* Process an edge of the tree where "upper" is the label of the upper bucket
    and "lower" is the label of the lower bucket of the edge.
 */
-unsafe fn process_edge(upper: u64, lower: u64) -> u64 {
+unsafe fn process_edge(upper: u64, lower: u64) -> (u64, u64) {
     let mut tree = &*g_tree;
     let mut congestion_cnt = 0;
 
@@ -869,7 +874,7 @@ unsafe fn process_edge(upper: u64, lower: u64) -> u64 {
 
     let (mut muUp, mut muDn) = calcMovement(&mut bucketUpper, &mut bucketLower, upper, lower);
 
-    congestion_cnt = permute(
+    return permute(
         &mut bucketUpper,
         &mut bucketLower,
         upper,
@@ -878,14 +883,11 @@ unsafe fn process_edge(upper: u64, lower: u64) -> u64 {
         &mut muDn,
     );
 
-    return congestion_cnt;
-
     //At the end of the function lock on the upper and lower bucket ends
 }
 
 unsafe fn simulate_oram_access(
     mut randomness: &mut ThreadRng,
-    mut r_dist: &mut Uniform<u64>,
     mut w_dist: &mut Uniform<u64>,
     mut x_dist: &mut Uniform<u64>,
 ) -> bool {
@@ -896,7 +898,7 @@ unsafe fn simulate_oram_access(
     printdbg!(0, " Access()");
 
     /* Perform one read */
-    success = simulate_oram_remove(&mut tree, &mut randomness, &mut r_dist);
+    success = simulate_oram_remove(&mut tree);
 
     /* Perform one write */
     if (success == true) {
@@ -937,27 +939,39 @@ unsafe fn simulate_oram_insert(
 
 unsafe fn simulate_oram_remove(
     tree: &Vec<Mutex<Bucket>>,
-    mut randomness: &mut ThreadRng,
-    mut r_dist: &mut Uniform<u64>,
 ) -> bool {
-    let mut success: bool = true;
+    let mut success: bool = false;
+    let mut total_removable: u64 = N!()*C + total_num_placed - total_num_removed;
 
-    //For experiment, randomly select a leaf node to remove.
-    //Ideally, this parameter must come as an input
-    let r = randomness.sample(*r_dist);
-    let mut bucket = tree[r as usize - 1].lock().unwrap();
+    /* Try to remove one block. In the case of failure,
+       try unless there is no more buckets available for read */
+    while (success != true) && (total_removable > 0){
+        //For experiment, remove from each bucket uniformly and in static order
+        //Ideally, this parameter must come as an input
+        {
+            let mut bucket = tree[nxtRdBktLabel as usize - 1].lock().unwrap();
 
-    //Bucket with label r is stored in location (r-1)
-    //For experimentation purpose always read the first item from the bucket
-    //Ideally, the client must only remove the requested block
-    if (bucket.occupancy() > 0) {
-        bucket.removeNxt();
-        bucket.calc_stat(); //Update statistics
-        bucket.stat.r_cnt += 1;
-        total_num_removed += 1;
-    } else {
+            //Bucket with label r is stored in location (r-1)
+            //For experimentation purpose always read the first item from the bucket
+            //Ideally, the client must only remove the requested block
+            if (bucket.occupancy() > 0) {
+                bucket.removeNxt();
+                bucket.calc_stat(); //Update statistics
+                bucket.stat.r_cnt += 1;
+                total_num_removed += 1;
+                success = true;
+            }
+
+            nxtRdBktLabel += 1;
+            /* Wrap around */
+            if (nxtRdBktLabel >= (two.pow(L as u32) - 1)){
+                nxtRdBktLabel = two.pow(L as u32 - 1);
+            }
+        }
+    }
+
+    if success == false {
         read_underflow_cnt += 1; //In real scenario, this will not happen unless the server misbehaves. Because, the client will not issue read in that case.
-        success = false;
     }
 
     return success;
@@ -974,6 +988,9 @@ unsafe fn simulate_oram_init(tree: &Vec<Mutex<Bucket>>) {
             bucket.calc_stat();
         } //Mutex guard for each bucket ends here
     }
+
+    /* At first the read must be from the first leaf */
+    nxtRdBktLabel = two.pow(L as u32 - 1);
 }
 
 unsafe fn oram_print_stat(print_details: bool, overallFile: &mut File) {
@@ -1175,10 +1192,11 @@ unsafe fn permute(
     lower: u64,
     muUp: &mut Vec<i32>,
     muDn: &mut Vec<i32>,
-) -> u64 {
+) -> (u64, u64) {
     let mut l_lower: u64 = ((lower as f64).log2() as u64) + 1;
     let mut congestion: bool = false;
-    let mut congestion_cnt: u64 = 0;
+    let mut lcl_congestion_cnt: u64 = 0;
+    let mut lcl_num_placed: u64 = 0;
 
     /* First swap */
     for i in 0..Z as usize {
@@ -1260,7 +1278,7 @@ unsafe fn permute(
                 /* Means routing process is able to return back
                 one block to its destined leaf bucket */
                 if (bucketLower.blocks[j].m.x == lower) {
-                    total_num_placed += 1;
+                    lcl_num_placed += 1;
                     last_placement_tu = tu;
                 }
             }
@@ -1298,16 +1316,16 @@ unsafe fn permute(
     }
 
     if congestion {
-        congestion_cnt = 1;
+        lcl_congestion_cnt = 1;
     }
 
-    return congestion_cnt;
+    return (lcl_congestion_cnt, lcl_num_placed);
 }
 
 unsafe fn experimental_function() {
-    let mut total_sim_steps: u64 = two.pow(40) as u64; //22 Working
-    let mut burst_cnt: u64 = 1; //two.pow(6) as u64;
-    let mut relax_cnt = 10; //u64 = two.pow() as u64;
+    let mut total_sim_steps: u64 = two.pow(30) as u64; //22 Working
+    let mut burst_cnt: u64 = 1;//82; //two.pow(6) as u64;
+    let mut relax_cnt = 10;//86000; //u64 = two.pow() as u64;
                             /* Unexpectedly, relax_cnt = 500 gives 3% congestion, whereas relax_cnt = 50 gives 0.61%
                                The reason is, for relax_cnt = 50, there is a high read underflow
                                hence, the effective relax count becomes quite less
