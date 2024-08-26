@@ -40,7 +40,7 @@ macro_rules! NumCPUCores {
 /* This must be initialized as macro, otherwise tree cannot be initialized statically */
 macro_rules! N {
     () => {
-        (2 as u64).pow(18) //2^12
+        (2 as u64).pow(27) //2^12
     };
 }
 
@@ -699,7 +699,11 @@ unsafe fn clinet_server_interaction(rxFrmRoute: mpsc::Receiver<u64>) {
     /* Do the experiment until a specified time */
     while tu < ITR_CNT {
         /* Wait for signal from the route thread */
-        let num_pending_access = rxFrmRoute.recv().unwrap(); //Not handling the error to improve performance
+        let mut num_pending_access: u64 = 0;
+        match rxFrmRoute.recv() {
+            Ok(received) => {num_pending_access = received},
+            Err(err) => println!("Failed to receive: {}, probably the Route() thread completed", err),
+        }
 
         let mut num_access = 0;
 
@@ -791,6 +795,9 @@ unsafe fn route(txFrmRoute: mpsc::Sender<u64>, overallStatFileHandle: &mut File)
             cur_lvl = 1;
         }
     }
+
+    /* At the end of the routing, send message to the CSI thread so that CSI thread do now wait forever */
+    txFrmRoute.send(0).unwrap();
 
     oram_print_stat(false, overallStatFileHandle);
 }
@@ -1193,7 +1200,6 @@ unsafe fn permute(
     muUp: &mut Vec<i32>,
     muDn: &mut Vec<i32>,
 ) -> (u64, u64) {
-    let mut l_lower: u64 = ((lower as f64).log2() as u64) + 1;
     let mut congestion: bool = false;
     let mut lcl_congestion_cnt: u64 = 0;
     let mut lcl_num_placed: u64 = 0;
@@ -1324,8 +1330,8 @@ unsafe fn permute(
 
 unsafe fn experimental_function() {
     let mut total_sim_steps: u64 = two.pow(30) as u64; //22 Working
-    let mut burst_cnt: u64 = 1;//82; //two.pow(6) as u64;
-    let mut relax_cnt = 10;//86000; //u64 = two.pow() as u64;
+    let mut burst_cnt: u64 = 82; //two.pow(6) as u64;
+    let mut relax_cnt = 86000; //u64 = two.pow() as u64;
                             /* Unexpectedly, relax_cnt = 500 gives 3% congestion, whereas relax_cnt = 50 gives 0.61%
                                The reason is, for relax_cnt = 50, there is a high read underflow
                                hence, the effective relax count becomes quite less
