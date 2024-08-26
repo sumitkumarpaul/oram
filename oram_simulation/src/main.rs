@@ -26,21 +26,20 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::Mutex;
 use std::thread;
-use std::sync::atomic::{AtomicU64, Ordering};
 use tfhe::prelude::*;
 use tfhe::ClientKey;
 
 /* Number of CPU cores */
 macro_rules! NumCPUCores {
     () => {
-        2048
+        16392
     };
 }
 
 /* This must be initialized as macro, otherwise tree cannot be initialized statically */
 macro_rules! N {
     () => {
-        (2 as u64).pow(20) //2^12
+        (2 as u64).pow(18) //2^12
     };
 }
 
@@ -120,8 +119,7 @@ static mut tu: u64 = 0; /* Count of time unit */
 static mut read_underflow_cnt: u64 = 0; /* The number of times the read operation failed */
 static mut write_failure_cnt: u64 = 0; /* The number of times the write operation failed */
 static mut write_failure_percentage: f64 = 0.0; /* The percentage of failed write operation */
-//static mut routing_congestion_cnt: u64 = 0; /* The number of times the background operation caused buffer overflow */
-static routing_congestion_cnt: AtomicU64 = AtomicU64::new(0);
+static mut routing_congestion_cnt: u64 = 0; /* The number of times the background operation caused buffer overflow */
 static mut routing_congestion_percentage: f64 = 0.0; /* The percentage of congested steps during routing */
 static mut num_congestion_blocks: u64 = 0; /* The number of blocks affected due to congestion */
 static mut max_burst_cnt: u64 = 0; /* The number of blocks the client retrives in a burst */
@@ -667,7 +665,7 @@ Parameters: N = {}, Z = {}, rate_ratio = {}, max_burst_cnt = {}, min_relax_cnt =
     tu = 0; /* Initialize with time count 0 */
 
     /* For synchronization between two threads */
-    let (txFrmRoute, rxFrmRoute): (mpsc::Sender<bool>, mpsc::Receiver<bool>) = mpsc::channel();
+    let (txFrmRoute, rxFrmRoute): (mpsc::Sender<u64>, mpsc::Receiver<u64>) = mpsc::channel();
 
     // Spawn a new thread to run `clinet_server_interaction()`
     let csi_thread_handle = thread::spawn(|| {
@@ -690,7 +688,7 @@ Parameters: N = {}, Z = {}, rate_ratio = {}, max_burst_cnt = {}, min_relax_cnt =
     );
 }
 
-unsafe fn clinet_server_interaction(rxFrmRoute: mpsc::Receiver<bool>) {
+unsafe fn clinet_server_interaction(rxFrmRoute: mpsc::Receiver<u64>) {
     //Initialize the randomness
     let mut randomness = rand::thread_rng();
     let mut r_dist = Uniform::new_inclusive(two.pow(L as u32 - 1), (two.pow(L as u32) - 1));
@@ -700,22 +698,20 @@ unsafe fn clinet_server_interaction(rxFrmRoute: mpsc::Receiver<bool>) {
     /* Do the experiment until a specified time */
     while tu < ITR_CNT {
         /* Wait for signal from the route thread */
-        let _ = rxFrmRoute.recv();
+        let num_pending_access = rxFrmRoute.recv().unwrap(); //Not handling the error to improve performance
 
-        let mut cur_burst_cnt = 0;
+        let mut num_access = 0;
 
         /* After getting chance, call access(), max_burst_cnt-number of times  */
-        while (cur_burst_cnt < max_burst_cnt) {
+        while (num_access < num_pending_access) {
             simulate_oram_access(&mut randomness, &mut r_dist, &mut w_dist, &mut x_dist);
 
-            cur_burst_cnt += 1;
+            num_access += 1;
         }
     }
 }
 
-unsafe fn route(txFrmRoute: mpsc::Sender<bool>, overallStatFileHandle: &mut File) {
-    //CSI thread is waiting, so at the beginning send a dummy start message to the CSI thread
-    txFrmRoute.send(true);
+unsafe fn route(txFrmRoute: mpsc::Sender<u64>, overallStatFileHandle: &mut File) {
     let mut cur_lvl: u64 = 1; //Start with processing level 1
     let mut edges: Vec<(u64, u64)> = Vec::new();
 
@@ -734,7 +730,7 @@ unsafe fn route(txFrmRoute: mpsc::Sender<bool>, overallStatFileHandle: &mut File
         */
 
         /* First process the left edges */
-        for label in two.pow(cur_lvl  as u32 - 1)..two.pow(cur_lvl  as u32) {
+        for label in two.pow(cur_lvl as u32 - 1)..two.pow(cur_lvl as u32) {
             if edges.len() < NumCPUCores!() {
                 edges.push((label, (2 * label))); //Left edge
             } else {
@@ -761,7 +757,7 @@ unsafe fn route(txFrmRoute: mpsc::Sender<bool>, overallStatFileHandle: &mut File
         }
 
         /* Then process the right edges */
-        for label in two.pow(cur_lvl  as u32 - 1)..two.pow(cur_lvl  as u32) {
+        for label in two.pow(cur_lvl as u32 - 1)..two.pow(cur_lvl as u32) {
             if edges.len() < NumCPUCores!() {
                 edges.push((label, ((2 * label) + 1)));
             } else {
@@ -800,11 +796,13 @@ unsafe fn route(txFrmRoute: mpsc::Sender<bool>, overallStatFileHandle: &mut File
 
 unsafe fn process_pending_edges(
     edges: &mut Vec<(u64, u64)>,
-    txFrmRoute: &mpsc::Sender<bool>,
+    txFrmRoute: &mpsc::Sender<u64>,
     overallFile: &mut File,
 ) -> bool {
     let mut do_break = false;
     let mut num_edge_processed = edges.len() as u64;
+    let mut num_pending_access: u64 = 0;
+
     printdbgln!(
         0,
         "tu: {}, Processing: {:?}, num_edge_processed = {}",
@@ -813,10 +811,15 @@ unsafe fn process_pending_edges(
         num_edge_processed
     );
 
-    //Process routing in parallel
-    edges.par_iter().for_each(|(upper, lower)| {
-        process_edge(*upper, *lower);
-    });
+    //Process routing in parallel and note down the congestion counts
+    let congestion_counts: Vec<u64> = edges
+        .par_iter()
+        .map(|(upper, lower)| process_edge(*upper, *lower))
+        .collect();
+
+    /* Update routing congestion */
+    routing_congestion_cnt += congestion_counts.iter().sum::<u64>();
+
     tu += num_edge_processed;
     since_access += num_edge_processed;
     since_print += num_edge_processed;
@@ -831,16 +834,20 @@ unsafe fn process_pending_edges(
         do_break = true;
     }
 
-    if since_access >= (max_burst_cnt + min_relax_cnt) {
+    num_pending_access = max_burst_cnt * (since_access / (max_burst_cnt + min_relax_cnt));
+
+    if num_pending_access > 0 {
         /* Enable the CSI thread to process access() */
         printdbgln!(
             0,
-            "Sending access signal at since: {}, at tu: {}",
+            "Sending signal for {}-access at since: {}, at tu: {}",
+            num_pending_access,
             since_access,
             tu
         );
-        txFrmRoute.send(true);
-        since_access = 0;
+
+        txFrmRoute.send(num_pending_access).unwrap();
+        since_access = since_access % (max_burst_cnt + min_relax_cnt);
     }
 
     //Clear the edge queue
@@ -852,16 +859,17 @@ unsafe fn process_pending_edges(
 /* Process an edge of the tree where "upper" is the label of the upper bucket
    and "lower" is the label of the lower bucket of the edge.
 */
-unsafe fn process_edge(upper: u64, lower: u64) {
+unsafe fn process_edge(upper: u64, lower: u64) -> u64 {
     let mut tree = &*g_tree;
+    let mut congestion_cnt = 0;
 
-    //At the begining of each processing lock is taken once
+    //At the begining of each processing lock is taken only on the buckets
     let mut bucketUpper = tree[upper as usize - 1].lock().unwrap();
     let mut bucketLower = tree[lower as usize - 1].lock().unwrap();
 
     let (mut muUp, mut muDn) = calcMovement(&mut bucketUpper, &mut bucketLower, upper, lower);
 
-    permute(
+    congestion_cnt = permute(
         &mut bucketUpper,
         &mut bucketLower,
         upper,
@@ -869,6 +877,8 @@ unsafe fn process_edge(upper: u64, lower: u64) {
         &mut muUp,
         &mut muDn,
     );
+
+    return congestion_cnt;
 
     //At the end of the function lock on the upper and lower bucket ends
 }
@@ -1007,7 +1017,7 @@ unsafe fn oram_print_stat(print_details: bool, overallFile: &mut File) {
 
     write_failure_percentage =
         ((write_failure_cnt * 100) as f64 / (write_failure_cnt + total_num_removed) as f64);
-    routing_congestion_percentage = ((routing_congestion_cnt.load(Ordering::SeqCst) * 100) as f64 / (tu + 1) as f64);
+    routing_congestion_percentage = ((routing_congestion_cnt * 100) as f64 / (tu + 1) as f64);
 
     simulation_percentage = (((tu + 1) * 100) as f64 / ITR_CNT as f64);
     read_underflow_percentage =
@@ -1060,7 +1070,8 @@ unsafe fn oram_print_stat(print_details: bool, overallFile: &mut File) {
 
     printdbgln!(
         1,
-        "**** Last updated at: {}, {} % simulation done, current statistics =>
+        "**** Last updated at: {}, {} % simulation done (tu = {} out of {}), current statistics is:
+-----------------------------------------------------------------------------------------------------------------------
 Read underflow count: {}({} %)
 Write failure count: {}({} %)
 Routing congestion count: {}({} %)
@@ -1070,11 +1081,13 @@ Total number of placements: {}({} %)
 Last placement occurred at: {}",
         timestamp,
         simulation_percentage.ceil(),
+        tu + 1,
+        ITR_CNT,
         read_underflow_cnt,
         read_underflow_percentage,
         write_failure_cnt,
         write_failure_percentage,
-        routing_congestion_cnt.load(Ordering::SeqCst),
+        routing_congestion_cnt,
         routing_congestion_percentage,
         global_max_bucket_load,
         total_num_removed,
@@ -1085,7 +1098,8 @@ Last placement occurred at: {}",
 
     if let Err(e) = writeln!(
         overallFile,
-        "**** Last updated at: {}, {} % simulation done, current statistics =>
+        "**** Last updated at: {}, {} % simulation done (tu = {} out of {}), current statistics is:
+-----------------------------------------------------------------------------------------------------------------------
 Read underflow count: {}({} %)
 Write failure count: {}({} %)
 Routing congestion count: {}({} %)
@@ -1095,11 +1109,13 @@ Total number of placements: {}({} %)
 Last placement occurred at: {}",
         timestamp,
         simulation_percentage.ceil(),
+        tu + 1,
+        ITR_CNT,
         read_underflow_cnt,
         read_underflow_percentage,
         write_failure_cnt,
         write_failure_percentage,
-        routing_congestion_cnt.load(Ordering::SeqCst),
+        routing_congestion_cnt,
         routing_congestion_percentage,
         global_max_bucket_load,
         total_num_removed,
@@ -1159,9 +1175,10 @@ unsafe fn permute(
     lower: u64,
     muUp: &mut Vec<i32>,
     muDn: &mut Vec<i32>,
-) {
+) -> u64 {
     let mut l_lower: u64 = ((lower as f64).log2() as u64) + 1;
     let mut congestion: bool = false;
+    let mut congestion_cnt: u64 = 0;
 
     /* First swap */
     for i in 0..Z as usize {
@@ -1281,20 +1298,21 @@ unsafe fn permute(
     }
 
     if congestion {
-        //routing_congestion_cnt += 1; //This is to be done within lock
-        routing_congestion_cnt.fetch_add(1, Ordering::SeqCst);
+        congestion_cnt = 1;
     }
+
+    return congestion_cnt;
 }
 
 unsafe fn experimental_function() {
-    let mut total_sim_steps: u64 = two.pow(38) as u64; //22 Working
-    let mut burst_cnt: u64 = 5; //two.pow(6) as u64;
-    let mut relax_cnt = 50; //u64 = two.pow() as u64;
+    let mut total_sim_steps: u64 = two.pow(40) as u64; //22 Working
+    let mut burst_cnt: u64 = 1; //two.pow(6) as u64;
+    let mut relax_cnt = 10; //u64 = two.pow() as u64;
                             /* Unexpectedly, relax_cnt = 500 gives 3% congestion, whereas relax_cnt = 50 gives 0.61%
                                The reason is, for relax_cnt = 50, there is a high read underflow
                                hence, the effective relax count becomes quite less
                             */
-    status_print_freq = two.pow(30) as u64;
+    status_print_freq = two.pow(32) as u64;
 
     oram_exp(
         N!(), //11 working//15 means 2^15*4KB blocks = 2^15*2^12 = 2^27 = 128MB
