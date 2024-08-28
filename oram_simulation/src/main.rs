@@ -941,6 +941,49 @@ unsafe fn simulate_oram_remove(
     mut randomness: &mut ThreadRng,
     mut r_dist: &mut Uniform<u64>,
 ) -> bool {
+    let mut success: bool = false;
+    let mut total_removable: u64 = ((N!()*C) + total_num_placed) - total_num_removed;
+
+    /* Try to remove one block. In the case of failure,
+     try unless there is no more buckets available for read */
+    while (success == false) && (total_removable > 0){
+        //For experiment, remove from each bucket uniformly and in static order
+        //Ideally, this parameter must come as an input
+        {
+            let mut bucket = tree[nxtRdBktLabel as usize - 1].lock().unwrap();
+
+            //Bucket with label r is stored in location (r-1)
+            //For experimentation purpose always read the first item from the bucket
+            //Ideally, the client must only remove the requested block
+            if (bucket.occupancy() > 0) {
+                bucket.removeNxt();
+                bucket.calc_stat(); //Update statistics
+                bucket.stat.r_cnt += 1;
+                total_num_removed += 1;
+                success = true;
+            }
+
+            nxtRdBktLabel += 1;
+            /* Wrap around */
+            if (nxtRdBktLabel > (two.pow(L as u32) - 1)){
+                nxtRdBktLabel = two.pow(L as u32 - 1);
+            }
+        }
+    }
+
+    if success == false {
+        read_underflow_cnt += 1; //In real scenario, this will not happen unless the server misbehaves. Because, the client will not issue read in that case.
+    }
+
+    return  success;
+
+}
+
+unsafe fn simulate_oram_remove_old(
+    tree: &Vec<Mutex<Bucket>>,
+    mut randomness: &mut ThreadRng,
+    mut r_dist: &mut Uniform<u64>,
+) -> bool {
     let mut success: bool = true;
     //For experiment, randomly select a leaf node to remove.
     //Ideally, this parameter must come as an input
@@ -1303,7 +1346,7 @@ unsafe fn permute(
 }
 
 unsafe fn experimental_function() {
-    let mut total_sim_steps: u64 = two.pow(30) as u64; //22 Working
+    let mut total_sim_steps: u64 = two.pow(36) as u64; //22 Working
     let mut burst_cnt: u64 = 1; //two.pow(6) as u64;
     let mut relax_cnt = 1000; //u64 = two.pow() as u64;
                             /* Unexpectedly, relax_cnt = 500 gives 3% congestion, whereas relax_cnt = 50 gives 0.61%
@@ -1314,7 +1357,7 @@ unsafe fn experimental_function() {
 
     oram_exp(
         N!(), //11 working//15 means 2^15*4KB blocks = 2^15*2^12 = 2^27 = 128MB
-        20,
+        40,
         1,
         (burst_cnt),     /* Only access few elements at the beginnig */
         (relax_cnt),     /* Then perform nothing for rest of the time */
