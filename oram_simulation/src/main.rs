@@ -18,6 +18,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
+use std::io;
 use std::io::Write;
 use std::io::{BufWriter, Result};
 use std::io::{Read, Seek, SeekFrom};
@@ -34,7 +35,7 @@ static mut nxtRdBktLabel: u64 = 0; /* Lable of the bucket which will be read nex
 /* Number of CPU cores */
 macro_rules! NumCPUCores {
     () => {
-        2048
+        2048//65536
     };
 }
 
@@ -131,7 +132,8 @@ static mut since_print: u64 = 0; /* How many edges are processed since last stat
 static mut status_print_freq: u64 = 0; /* After how many edge processing the status must be printed */
 static mut global_max_bucket_load: u64 = 0; /* Maximum load occurred in any bucket */
 static mut total_num_removed: u64 = 0; /* Total number of blocks removed from its leaf location */
-static mut total_num_placed: u64 = 0; /* How many number of blocks are returned to place by the routing process */
+//static mut total_num_placed: u64 = 0; /* How many number of blocks are returned to place by the routing process */
+static total_num_placed: AtomicU64 = AtomicU64::new(0);
 static mut last_placement_tu: u64 = 0; /* When the last block is placed to its destined leaf */
 static mut clrOld: bool = false; /* Clear previous prints */
 
@@ -901,7 +903,13 @@ unsafe fn simulate_oram_access(
 
     /* Perform one write */
     if (success == true) {
-        success = simulate_oram_insert(&mut tree, &mut randomness, &mut x_dist, &mut w_dist);
+        //success = simulate_oram_insert(&mut tree, &mut randomness, &mut x_dist, &mut w_dist);
+
+        //Keep trying inserting, until it succeeds. Otherwise we will keep loosing blocks
+        let mut insert_ok:bool = false;
+        while insert_ok == false {
+            insert_ok = simulate_oram_insert(&mut tree, &mut randomness, &mut x_dist, &mut w_dist);
+        }
     }
 
     return success;
@@ -942,7 +950,8 @@ unsafe fn simulate_oram_remove(
     mut r_dist: &mut Uniform<u64>,
 ) -> bool {
     let mut success: bool = false;
-    let mut total_removable: u64 = ((N!()*C) + total_num_placed) - total_num_removed;
+    let mut total_removable: u64 = ((N!()*C) - total_num_removed) + total_num_placed.load(Ordering::SeqCst);
+    let mut nxtRdBktLabel_prev = nxtRdBktLabel;
 
     /* Try to remove one block. In the case of failure,
      try unless there is no more buckets available for read */
@@ -957,7 +966,7 @@ unsafe fn simulate_oram_remove(
             //Ideally, the client must only remove the requested block
             if (bucket.occupancy() > 0) {
                 bucket.removeNxt();
-                bucket.calc_stat(); //Update statistics
+                //bucket.calc_stat(); //Update statistics
                 bucket.stat.r_cnt += 1;
                 total_num_removed += 1;
                 success = true;
@@ -973,6 +982,11 @@ unsafe fn simulate_oram_remove(
 
     if success == false {
         read_underflow_cnt += 1; //In real scenario, this will not happen unless the server misbehaves. Because, the client will not issue read in that case.
+        printdbgln!(1, "Read overflow occurred..total_removable = {}, nxtRdBktLabel_prev = {}, nxtRdBktLabel = {}", total_removable, nxtRdBktLabel_prev, nxtRdBktLabel);
+        let mut input = String::new();
+        io::stdin()
+            .read_line(&mut input)
+            .expect("Failed to read line");
     }
 
     return  success;
@@ -1066,7 +1080,7 @@ unsafe fn oram_print_stat(print_details: bool, overallFile: &mut File) {
     simulation_percentage = (((tu + 1) * 100) as f64 / ITR_CNT as f64);
     read_underflow_percentage =
         (((read_underflow_cnt) * 100) as f64 / (read_underflow_cnt + total_num_removed) as f64);
-    placement_percentage = (((total_num_placed) * 100) as f64 / total_num_removed as f64);
+    placement_percentage = (((total_num_placed.load(Ordering::SeqCst)) * 100) as f64 / total_num_removed as f64);
 
     if clrOld {
         // ANSI escape code to move the cursor up 8 lines
@@ -1116,8 +1130,8 @@ unsafe fn oram_print_stat(print_details: bool, overallFile: &mut File) {
         1,
         "**** Last updated at: {}, {} % simulation done (tu = {} out of {}), current statistics is:
 -----------------------------------------------------------------------------------------------------------------------
-Read underflow count: {}({} %)
-Write failure count: {}({} %)
+Remove underflow count: {}({} %)
+Insert failure count: {}({} %)
 Routing congestion count: {}({} %)
 Global max load: {}
 Total number of removals: {}
@@ -1135,7 +1149,7 @@ Last placement occurred at: {}",
         routing_congestion_percentage,
         global_max_bucket_load,
         total_num_removed,
-        total_num_placed,
+        total_num_placed.load(Ordering::SeqCst),
         placement_percentage,
         last_placement_tu
     );
@@ -1144,8 +1158,8 @@ Last placement occurred at: {}",
         overallFile,
         "**** Last updated at: {}, {} % simulation done (tu = {} out of {}), current statistics is:
 -----------------------------------------------------------------------------------------------------------------------
-Read underflow count: {}({} %)
-Write failure count: {}({} %)
+Remove underflow count: {}({} %)
+Insert failure count: {}({} %)
 Routing congestion count: {}({} %)
 Global max load: {}
 Total number of removals: {}
@@ -1163,7 +1177,7 @@ Last placement occurred at: {}",
         routing_congestion_percentage,
         global_max_bucket_load,
         total_num_removed,
-        total_num_placed,
+        total_num_placed.load(Ordering::SeqCst),
         placement_percentage,
         last_placement_tu
     ) {
@@ -1302,8 +1316,8 @@ unsafe fn permute(
                 /* Means routing process is able to return back
                 one block to its destined leaf bucket */
                 if (bucketLower.blocks[j].m.x == lower) {
-                    total_num_placed += 1;
-                    last_placement_tu = tu;
+                    total_num_placed.fetch_add(1, Ordering::SeqCst);
+                    //last_placement_tu = tu;
                 }
             }
         }
@@ -1318,7 +1332,7 @@ unsafe fn permute(
         //let mut congested_buckets = g_congested_buckets.lock().unwrap();
         /* Ideally there should not be any movable block in either bucket */
         if (muUp[i] == MOVE!()) {
-            num_congestion_blocks += 1; //This is to be done within lock
+            //num_congestion_blocks += 1; //This is to be done within lock
 
             /*
             Still some blocks in the upper bucket remains unmoved
@@ -1328,7 +1342,7 @@ unsafe fn permute(
             congestion = true;
         }
         if (muDn[i] == MOVE!()) {
-            num_congestion_blocks += 1;
+            //num_congestion_blocks += 1;
 
             /*
             Still some blocks in the lower bucket remains unmoved
@@ -1357,7 +1371,7 @@ unsafe fn experimental_function() {
 
     oram_exp(
         N!(), //11 working//15 means 2^15*4KB blocks = 2^15*2^12 = 2^27 = 128MB
-        40,
+        32,
         1,
         (burst_cnt),     /* Only access few elements at the beginnig */
         (relax_cnt),     /* Then perform nothing for rest of the time */
