@@ -1,42 +1,27 @@
-use tfhe::boolean::backward_compatibility::client_key;
-use tfhe::integer::bigint::U1024;
-use tfhe::prelude::*;
-use tfhe::{
-    generate_keys, set_server_key, ConfigBuilder, FheBool, FheInt32, FheUint, FheUint1024,
-    FheUint1024Id,
-};
 extern crate chrono;
 use chrono::Local;
 use std::env;
-use core::num;
 use once_cell::sync::Lazy;
-use rand::distributions::{Distribution, Uniform};
+use rand::distributions::{Uniform};
 use rand::rngs::ThreadRng;
 use rand::Rng;
 use rayon::prelude::*;
-use std::collections::HashMap;
-use std::collections::VecDeque;
 use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io;
 use std::io::Write;
-use std::io::{BufWriter, Result};
-use std::io::{Read, Seek, SeekFrom};
-use std::mem::MaybeUninit;
-use std::path::{Path, PathBuf};
+use std::path::{Path};
 use std::sync::mpsc;
 use std::sync::Mutex;
 use std::thread;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tfhe::prelude::*;
-use tfhe::ClientKey;
-static mut nxtRdBktLabel: u64 = 0; /* Lable of the bucket which will be read next */
 
+/* Macros */
 /* Number of CPU cores */
 macro_rules! NumCPUCores {
     () => {
-        2048//65536
+        2048
     };
 }
 
@@ -61,9 +46,6 @@ static g_tree: Lazy<Vec<Mutex<Bucket>>> = Lazy::new(|| {
 
     local_tree
 });
-
-// Define a global mutable list (vector) wrapped in a Mutex for thread safety
-static g_congested_buckets: Lazy<Mutex<Vec<u64>>> = Lazy::new(|| Mutex::new(vec![]));
 
 macro_rules! printdbgln {
     ($dlvl:expr, $($arg:tt)*) => {
@@ -105,6 +87,7 @@ macro_rules! NOT_MOVE {
         0
     };
 }
+
 static mut N: u64 = (2 as u64).pow(12);
 static mut L: u64 = 4;
 static mut R: u64 = 1;
@@ -112,27 +95,16 @@ static mut C: u64 = 1; /* Initial number of replicas */
 static mut Z: u64 = 8;
 static mut ITR_CNT: u64 = 1024; /* The experiment will run for this amount of time */
 
-static mut B: u64 = 4096; /* Common block size is: 4KB
-                          But RLWE can encrypt 3KB per ciphertext.
-                          So, block size must be set to multiple of 3KB.
-                          Moreover, some place must be kept reserved for storing metadata */
 static mut epoch: u64 = 14; //2(N-1)
 static mut rate_ratio: u64 = 10; //Ratio of server's processing : Client's processing
 static mut two: u64 = 2;
 static mut tu: u64 = 0; /* Count of time unit */
 static mut remove_failure_cnt: u64 = 0; /* The number of times the read operation failed */
 static mut insert_failure_cnt: u64 = 0; /* The number of times the write operation failed */
-//static mut routing_congestion_cnt: u64 = 0;
 static routing_congestion_cnt: AtomicU64 = AtomicU64::new(0);
-//static mut num_processed_edges: u64 = 0;
-//static mut num_processed_edges: AtomicU64 = AtomicU64::new(0);
-//static mut total_num_placed: u64 = 0; /* How many number of blocks are returned to place by the routing process */
 static total_num_placed: AtomicU64 = AtomicU64::new(0);
-//static mut total_no_routing: u64 = 0;
 static total_unable_routing: AtomicU64 = AtomicU64::new(0);
-//static mut total_routing_required: u64 = 0;
 static total_routing_required: AtomicU64 = AtomicU64::new(0);
-static mut num_congestion_blocks: u64 = 0; /* The number of blocks affected due to congestion */
 static mut max_burst_cnt: u64 = 0; /* The number of blocks the client retrives in a burst */
 static mut min_relax_cnt: u64 = 0; /* The amount of time (in terms of step processing), the client relaxes after each burst */
 static mut since_access: u64 = 0; /* How many edges are processed since last signaling the CSI thread */
@@ -142,6 +114,8 @@ static mut global_max_bucket_load: u64 = 0; /* Maximum load occurred in any buck
 static mut total_num_removed: u64 = 0; /* Total number of blocks removed from its leaf location */
 static mut last_placement_tu: u64 = 0; /* When the last block is placed to its destined leaf */
 static mut clrOld: bool = false; /* Clear previous prints */
+static mut nxtRdBktLabel: u64 = 0; /* Lable of the bucket which will be read next */
+
 
 #[derive(Debug)]
 struct m {
@@ -151,7 +125,6 @@ struct m {
 #[derive(Debug)]
 struct blk {
     m: m,
-    //d: Vec<FheUint<FheUint1024Id>>,
     d: u64,
 }
 
@@ -197,36 +170,9 @@ impl blk {
     fn new(id: u64, lf: u64) -> Self {
         blk {
             m: m { a: 0, x: 0 },
-            //d: Vec::new(),
             d: 0 as u64,
         }
     }
-
-    fn mk_empty(&mut self) {
-        self.m.a = 0;
-        self.m.x = 0;
-    }
-
-    fn copy_to(&self, dstblk: &mut blk) {
-        dstblk.m.a = self.m.a;
-        dstblk.m.x = self.m.x;
-    }
-
-    /* Fill all NUMu64! with same data */
-    /*/
-    fn fillData(&mut self, d: FheUint1024) {
-        for _ in 0..NUMu64!() {
-            self.d.push(d.clone());
-        }
-    }
-
-    /* Print data */
-    fn printData(&mut self, client_key: &ClientKey) {
-        for _ in 0..NUMu64!() {
-            //self.d.push(d.clone());
-        }
-    }
-    */
 }
 
 impl Bucket {
@@ -263,8 +209,6 @@ impl Bucket {
             for slot in 0..Z as usize {
                 if self.blocks[slot].m.x == 0 {
                     self.blocks[slot].m.x = x;
-                    //self.blocks[slot].m.a = a;
-                    //self.blocks[slot].d = d;
                     success = true;
                     break;
                 }
@@ -311,20 +255,6 @@ impl Bucket {
 
         return removed_item;
     }
-
-    // Method to remove an item by its value
-    /*
-    fn removeVal(&mut self, value: u64) -> u64 {
-        let mut removed_item: u64 = 0;
-
-        if let Some(pos) = self.blocks.iter().position(|&x| x == value) {
-            removed_item = self.blocks[pos];
-            self.blocks.remove(pos);
-        }
-
-        return removed_item;
-    }
-    */
 
     // Method to update the statistics of the bucket
     fn calc_stat(&mut self) -> Stat {
@@ -475,58 +405,6 @@ fn main() {
 
 }
 
-/* Implementation of this function not completed.
-  It must determine, the timestamp when the current block will be
-  available to the leaf bucket.
-*/
-#[cfg(predicate)]
-unsafe fn AvailabilityTS(Tcur: u64, x: u64, w: u64) -> u64 {
-    let mut Texp: u64;
-    let mut t: u64 = 0;
-
-    let mut lw: u64 = ((w as f64).log2() as u64) + 1; //Automatic floor operation due to type conversion
-    let mut ax: u64 = (x >> (L - lw));
-    let mut aw: u64 = w; //Ancestor of w, start with w
-    let mut prev_aw: u64;
-
-    printdbgln!(0, "level of w({}) is: {}", w, lw);
-    printdbgln!(0, "Ancestor of x({}) is: {}", x, ax);
-
-    while (ax != aw) {
-        t = t + 2 * (N - 1) - aw - 1;
-
-        if ((aw % 2) == 0) {
-            t = t + 1;
-        }
-
-        prev_aw = aw;
-        ax = ax << 1;
-        aw = aw << 1;
-    }
-
-    Texp = 0;
-
-    return Texp;
-}
-
-/* Observation till date:
-- access count of bucket[1] is almost 2/3 of other buckets
-- Maximum occupancy of upper buckets are in single digit. Average is very less
-  - Maximum occupancy of the upper buckets decreases if the rate increases
-- Upper the buffer, average is more. Except the root.
-- Bucket[7] has extreamly low average (why?)
-- Lower layer buckets have irregular stats
-- Lower buckets are accessed less number of times, as expected
-- Bucket[15]'s stats are very low
-- There are lots of read failure events
-- Upper layer buckets goes through more movement and lower layers through less movement
-- Leaf buckets have average over 9, why this is happening?
-- The maximum of lower buffers are going beyond 26, how to control that?
-- For the same rate ratio, maximum value of upper layer buckets changes with N. If N increase, max value is also increasing
-- We can think each bucket as a queue, from S. Keshav's video, I learnt that for maintaining a stable situation the arrival rate must be less than
-  the departure rate. How to calculate the arrival and departure rates? I can see that the #arrival = #departure as expected
-- With the increase of N, write failure increases. N=2^15 failure 57311/50000000. N=2^10: 2960/50000000. N=2^4: 1/50000000.
-*/
 unsafe fn oram_exp(
     _N: u64,
     _Z: u64,
@@ -833,9 +711,6 @@ unsafe fn process_edge(upper: u64, lower: u64) {
         );
     }
 
-    //num_processed_edges += 1;
-    //num_processed_edges.fetch_add(1, Ordering::SeqCst);
-
     //At the end of the function lock on the upper and lower bucket ends
 }
 
@@ -856,8 +731,6 @@ unsafe fn simulate_oram_access(
 
     /* Perform one write */
     if (success == true) {
-        //success = simulate_oram_insert(&mut tree, &mut randomness, &mut x_dist, &mut w_dist);
-
         //Keep trying inserting, until it succeeds. Otherwise we will keep loosing blocks
         let mut insert_ok:bool = false;
         while insert_ok == false {
@@ -885,9 +758,7 @@ unsafe fn simulate_oram_insert(
         //Bucket with label w is stored in location (w-1)
         //Write a block having leaf label x, into the bucket(w)
         bucketW.insert(x, 0, 0); //Last two parameters are dummy now
-        //bucketW.calc_stat(); //For improving simulation speed, not updating individual bucket statistics
-        //bucketW.stat.w_cnt += 1;
-        //bucketW.stat.x_cnt += 1;
+
         success = true;
     } else {
         /* Cannot write to the block, as it is already full */
@@ -904,7 +775,6 @@ unsafe fn simulate_oram_remove(
 ) -> bool {
     let mut success: bool = false;
     let mut total_removable: u64 = ((N!()*C) - total_num_removed) + total_num_placed.load(Ordering::SeqCst);
-    //let mut total_removable: u64 = ((N!()*C) - total_num_removed) + total_num_placed;
 
     /* Try to remove one block. In the case of failure,
      try unless there is no more buckets available for read */
@@ -919,7 +789,6 @@ unsafe fn simulate_oram_remove(
             //Ideally, the client must only remove the requested block
             if (bucket.occupancy() > 0) {
                 bucket.removeNxt();
-                //bucket.calc_stat(); //Update statistics
                 bucket.stat.r_cnt += 1;
                 total_num_removed += 1;
                 success = true;
@@ -946,7 +815,6 @@ unsafe fn simulate_oram_init(tree: &Vec<Mutex<Bucket>>) {
             for i in 0..C {
                 bucket.insert(x, 0, 0); /* Last two parameters are dummy now */
             }
-            //bucket.calc_stat();//For improving simulation speed, not updating individual bucket statistics
         } //Mutex guard for each bucket ends here
     }
 
@@ -973,38 +841,6 @@ unsafe fn oram_print_stat(print_details: bool, overallFile: &mut File) {
 
     let lcl_timestamp = Local::now().format("%Y-%m-%d_%H:%M:%S").to_string();
 
-    #[cfg(any())]
-    {
-        let mut detailedFile: File;
-        let detailed_filename = folder_path.join("detailed_log.csv");
-
-        if print_details {
-            // Handle the Result returned by File::create using match
-            detailedFile = match File::create(&detailed_filename) {
-                Ok(f) => f,
-                Err(e) => {
-                    eprintln!("Failed to create file: {}", e);
-                    return; // Exit the function if file creation fails
-                }
-            };
-
-            // Handle the Result returned by writeln! using match
-            if let Err(e) = writeln!(detailedFile, "Bucket,a_cnt,r_cnt,w_cnt,x_cnt,cur_occupancy,avg,var,max,out_up,out_lft,out_rgt,in_up,in_lft,in_rgt,sty") {
-            eprintln!("Failed to write to file: {}", e);
-            return; // Exit the function if writing fails
-        }
-
-            for b in 1..=(two.pow(L) - 1) {
-                tree[b as usize - 1].print_detailed_stat(&mut detailedFile);
-            }
-
-            /* Note: We are not calculating read error. i.e., the block must be availabel at some leaf but is not.
-             Basically, if the server is honest(but curious) then that value must be zero, if routing_congestion_cnt = 0
-            */
-            let mut congested_buckets = g_congested_buckets.lock().unwrap();
-        }
-    }
-
     if clrOld {
         // ANSI escape code to move the cursor up 8 lines
         print!("\x1b[7A");
@@ -1014,39 +850,6 @@ unsafe fn oram_print_stat(print_details: bool, overallFile: &mut File) {
 
         // Flush stdout to apply changes
         std::io::stdout().flush().unwrap();
-
-        #[cfg(no_compile)]
-        {
-        // Read the entire file into a string
-        let mut content = String::new();
-        // Move the cursor back to the begining of the file
-        overallFile.seek(SeekFrom::Start(0));
-        overallFile.read_to_string(&mut content);
-
-        // Split the content by lines and collect them
-        let mut lines: Vec<&str> = content.lines().collect();
-
-        // Remove the last 9 lines
-        lines.truncate(lines.len() - 9);
-
-        // Join the remaining lines back together
-        let new_content = lines.join("\n") + "\n";
-
-        // Truncate the file and write the new content
-        overallFile.set_len(0); // Clear the file
-        overallFile.seek(SeekFrom::Start(0)); // Move the cursor to the start
-        overallFile.write_all(new_content.as_bytes());
-        overallFile.flush();
-
-        // Read the entire file into a string
-        let mut content1 = String::new();
-        // Move the cursor back to the begining of the file
-        overallFile.seek(SeekFrom::Start(0));
-        overallFile.read_to_string(&mut content1);
-
-        // Split the content by lines and collect them
-        let mut lines1: Vec<&str> = content1.lines().collect();
-        }
     }
 
     /* From the second time onwards, it will be set */
@@ -1071,44 +874,10 @@ Total number of placements: {}({} %)",
         lcl_insert_failure_percentage,
         lcl_routing_congestion_cnt,
         lcl_routing_congestion_percentage,
-        //global_max_bucket_load,
         lcl_total_num_removed,
         lcl_total_num_placed,
         lcl_placement_percentage,
-        //last_placement_tu
     );
-
-    #[cfg(no_compile)]
-    if let Err(e) = writeln!(
-        overallFile,
-        "**** Last updated at: {}, {} % simulation done (tu = {} out of {}), current statistics is:
------------------------------------------------------------------------------------------------------------------------
-Remove failure count: {}({} %)
-Insert failure count: {}({} %)
-Routing congestion count: {}({} %)
-Global max load: {}
-Total number of removals: {}
-Total number of placements: {}({} %)
-Last placement occurred at: {}",
-        timestamp,
-        simulation_percentage.ceil(),
-        tu + 1,
-        ITR_CNT,        
-        remove_failure_cnt,
-        remove_failure_percentage,
-        insert_failure_cnt,
-        insert_failure_percentage,
-        routing_congestion_cnt.load(Ordering::SeqCst),
-        routing_congestion_percentage,
-        global_max_bucket_load,
-        total_num_removed,
-        total_num_placed.load(Ordering::SeqCst),
-        placement_percentage,
-        last_placement_tu
-    ) {
-        eprintln!("Failed to write to file: {}", e);
-        return; // Exit the function if writing fails
-    }
 
     if let Err(e) = writeln!(
         overallFile,
@@ -1256,7 +1025,6 @@ unsafe fn calcMovement(
     }
 
     if routing_req {
-        //total_routing_required += 1;
         total_routing_required.fetch_add(1, Ordering::SeqCst);
     }
 
@@ -1359,88 +1127,35 @@ unsafe fn permute(
                 one block to its destined leaf bucket */
                 if (bucketLower.blocks[j].m.x == lower) {
                     total_num_placed.fetch_add(1, Ordering::SeqCst);
-                    //total_num_placed += 1;
-                    //last_placement_tu = tu;
                 }
             }
         }
     }
 
-    /* Update block statistics */
-    //bucketLower.calc_stat();//For improving simulation speed, not updating individual bucket statistics
-    //bucketUpper.calc_stat();//For improving simulation speed, not updating individual bucket statistics
-
     /* After performing permutation, check congestion */
     for i in 0..Z as usize {
-        //let mut congested_buckets = g_congested_buckets.lock().unwrap();
         /* Ideally there should not be any movable block in either bucket */
         if (muUp[i] == MOVE!()) {
-            //num_congestion_blocks += 1; //This is to be done within lock
-
             /*
             Still some blocks in the upper bucket remains unmoved
               Means, the lower bucket is full and congested
             */
-            //congested_buckets.push(lower);
             congestion = true;
         }
         if (muDn[i] == MOVE!()) {
-            //num_congestion_blocks += 1;
-
             /*
             Still some blocks in the lower bucket remains unmoved
               Means, the upper bucket is full and congested
             */
-            //congested_buckets.push(upper);
             congestion = true;
         }
     }
 
     if congestion {
-        //routing_congestion_cnt += 1; //This is to be done within lock
         routing_congestion_cnt.fetch_add(1, Ordering::SeqCst);
     }
 
     if unable_routing {
-        //total_unable_routing += 1;
         total_unable_routing.fetch_add(1, Ordering::SeqCst);
     }
-}
-
-/* Implications till now:
-   - Larger N, will take larger ITR_CNT to get stable result
-   - Lower N will give stable result with low ITR_CNT
-   - However, lower N will give higher remove failure. Because not enough to remove
-   - So the solution is to use lower N with large Z
-   - N=2048 and Z=128 gave too good result, specially the insertion failure = 0
-   - How much iteration is enough for N=4096,Z=64? (IRT_CNT=2^33 gave decent result, is it stable?)
-   - First find out a stable iteration count for N=4096,Z=64. Try to plot it timewise
-   - Then check whether stability can be achieved with lower iteration count for lower N
-   - Then verify with the 100GB and 100MB remote data access
-*/
-unsafe fn experimental_function() {
-    let mut total_sim_steps: u64 = two.pow(37) as u64; //34 Working
-    let mut burst_cnt: u64 = 1; //two.pow(6) as u64;
-    //let mut relax_cnt = 270; //12.5GB per day => done
-    //let mut relax_cnt = 1350; //2.5GB per day => done
-    //let mut relax_cnt = 33750; //100MB per day => done
-    //let mut relax_cnt = 17280; //200MB per day => done
-    //let mut relax_cnt = 6750; //500MB per day => done
-    //let mut relax_cnt = 4320; //800MB per day => done;
-    //let mut relax_cnt = 2160; //1.6GB per day => done;
-    //let mut relax_cnt = 540; //6.4GB per day => done;
-    let mut relax_cnt = 2160; //800MB per day;
-                            /* Unexpectedly, relax_cnt = 500 gives 3% congestion, whereas relax_cnt = 50 gives 0.61%
-                               The reason is, for relax_cnt = 50, there is a high read underflow
-                               hence, the effective relax count becomes quite less
-                            */
-
-    oram_exp(
-        N!(), //11 working//15 means 2^15*4KB blocks = 2^15*2^12 = 2^27 = 128MB
-        64,
-        1,
-        (burst_cnt),     /* Only access few elements at the beginnig */
-        (relax_cnt),     /* Then perform nothing for rest of the time */
-        total_sim_steps, //total_sim_steps/_N should be 2^11?
-    );
 }
