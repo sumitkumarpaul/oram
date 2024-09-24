@@ -24,7 +24,7 @@ RUSTFLAGS=-Awarnings cargo run --release -- <Argument 1 <Argument 2> <Argument 3
 
    This parameter decides the average daily remote data usage amount during simulation.
    For example, you want to simulate the behavior of *RouterORAM*, when on average the client daily accesses 800MB or remote data. Then total I/O time for accessing 800MB data on the 40MB/s disk would be: $\frac{800MB}{40MB/s}$ = 20seconds.
-   So, in this case, the value of the **argument 3** would be:$\frac{24\times 60\times 60}{20}=4320$.
+   So, in this case, the value of the **argument 3** would be: $\frac{24\times 60\times 60}{20}=4320$.
 - **Argument 4:** Total number of simulation steps.
 
     **Note:** To get stable result, significantly large value is required to be used (e.g., $2^{37}$ or larger)
