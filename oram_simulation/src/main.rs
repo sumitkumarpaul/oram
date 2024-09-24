@@ -470,7 +470,7 @@ fn main() {
         arg[1] = <Number of leaves: N>
         arg[2] = <Number of slots in each bucket: Z>
         arg[3] = <The ratio, (Total time of a day)/(time required to perform client requested I/O in 40MB/s disk)>
-        arg[4] = <Number of iteration steps>")
+        arg[4] = <Total number of simulation steps>")
     }
 
 }
@@ -629,9 +629,9 @@ Parameters: N = {}, Z = {}, rate_ratio = {}, max_burst_cnt = {}, min_relax_cnt =
     });
 
     // Wait for the spawned threads to finish
-    route_thread_handle.join().unwrap();
     csi_thread_handle.join().unwrap();
-
+    route_thread_handle.join().unwrap();
+    
     printdbgln!(
         1,
         "Experimentation ended at: {}",
@@ -1007,7 +1007,7 @@ unsafe fn oram_print_stat(print_details: bool, overallFile: &mut File) {
 
     if clrOld {
         // ANSI escape code to move the cursor up 8 lines
-        print!("\x1b[9A");
+        print!("\x1b[7A");
 
         // ANSI escape code to clear from cursor to end of screen
         print!("\x1b[J");
@@ -1059,10 +1059,8 @@ unsafe fn oram_print_stat(print_details: bool, overallFile: &mut File) {
 Remove failure count: {}({} %)
 Insert failure count: {}({} %)
 Routing congestion count: {}({} %)
-Global max load: {}
 Total number of removals: {}
-Total number of placements: {}({} %)
-Last placement occurred at: {}",
+Total number of placements: {}({} %)",
         lcl_timestamp,
         lcl_simulation_percentage.ceil(),
         lcl_tu + 1,
@@ -1073,11 +1071,11 @@ Last placement occurred at: {}",
         lcl_insert_failure_percentage,
         lcl_routing_congestion_cnt,
         lcl_routing_congestion_percentage,
-        global_max_bucket_load,
+        //global_max_bucket_load,
         lcl_total_num_removed,
         lcl_total_num_placed,
         lcl_placement_percentage,
-        last_placement_tu
+        //last_placement_tu
     );
 
     #[cfg(no_compile)]
